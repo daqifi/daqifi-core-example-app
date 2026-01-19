@@ -12,7 +12,7 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(DaqifiCoreProjectPath)' == ''">
-    <PackageReference Include="Daqifi.Core" Version="0.8.0" />
+    <PackageReference Include="Daqifi.Core" Version="0.9.2" />
   </ItemGroup>
 
 </Project>
