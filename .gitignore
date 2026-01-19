@@ -1,0 +1,17 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Output files
+*.csv
+*.jsonl
