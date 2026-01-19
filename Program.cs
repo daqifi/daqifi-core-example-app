@@ -66,8 +66,21 @@ internal class Program
 
     private static async Task<int> RunStreamingSessionAsync(CliOptions options)
     {
-        using var transport = new TcpStreamTransport(options.IpAddress!, options.Port);
-        using var device = new DaqifiDevice("DAQiFi Device", transport);
+        // Build connection options from CLI parameters
+        var connectionOptions = new DeviceConnectionOptions
+        {
+            ConnectionRetry = new ConnectionRetryOptions
+            {
+                Enabled = options.ConnectAttempts > 1,
+                MaxAttempts = Math.Max(1, options.ConnectAttempts),
+                ConnectionTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds)
+            }
+        };
+
+        using var device = await DaqifiDeviceFactory.ConnectTcpAsync(
+            options.IpAddress!,
+            options.Port,
+            connectionOptions);
         using var outputWriter = CreateOutputWriter(options);
 
         device.StatusChanged += (_, eventArgs) =>
@@ -123,10 +136,7 @@ internal class Program
 
         try
         {
-            Console.WriteLine($"Connecting to {options.IpAddress}:{options.Port}...");
-            await ConnectTransportAsync(transport, options);
-            device.Connect();
-            await device.InitializeAsync();
+            Console.WriteLine($"Connected to {options.IpAddress}:{options.Port}");
 
             if (!string.IsNullOrWhiteSpace(options.ChannelMask))
             {
@@ -292,19 +302,6 @@ internal class Program
                $"\"analog\":[{string.Join(",", analogValues)}]," +
                $"\"digital\":\"{digitalBytes}\"" +
                "}";
-    }
-
-    private static async Task ConnectTransportAsync(TcpStreamTransport transport, CliOptions options)
-    {
-        var timeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds);
-        var retryOptions = new ConnectionRetryOptions
-        {
-            Enabled = options.ConnectAttempts > 1,
-            MaxAttempts = Math.Max(1, options.ConnectAttempts),
-            ConnectionTimeout = timeout
-        };
-
-        await transport.ConnectAsync(retryOptions);
     }
 
     private static TextWriter CreateOutputWriter(CliOptions options)
