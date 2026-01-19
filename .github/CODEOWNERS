@@ -1,0 +1,5 @@
+# DAQiFi Core Example App Code Owners
+# These owners will be requested for review when PRs are opened
+
+# Default owners for everything in the repo
+* @daqifi/daqifi-core
