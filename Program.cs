@@ -257,11 +257,20 @@ internal class Program
                               $"SN:{args.DeviceInfo.SerialNumber} FW:{args.DeviceInfo.FirmwareVersion}");
         };
 
-        var devices = await finder.DiscoverAsync(timeout);
+        List<IDeviceInfo> devices;
+        try
+        {
+            devices = (await finder.DiscoverAsync(timeout)).ToList();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during serial discovery: {ex.Message}");
+            devices = new List<IDeviceInfo>();
+        }
 
         Console.WriteLine();
-        Console.WriteLine($"Discovered {devices.Count()} DAQiFi device(s):");
-        if (!devices.Any())
+        Console.WriteLine($"Discovered {devices.Count} DAQiFi device(s):");
+        if (devices.Count == 0)
         {
             Console.WriteLine("  (no DAQiFi devices found)");
             Console.WriteLine();
