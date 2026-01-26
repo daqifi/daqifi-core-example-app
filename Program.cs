@@ -45,7 +45,7 @@ internal class Program
 
         if (options.DiscoverSerial)
         {
-            DiscoverSerialPorts();
+            await DiscoverSerialDevicesAsync(options.DiscoveryTimeoutSeconds);
         }
 
         // Check if we have a connection target (IP or serial)
@@ -244,20 +244,46 @@ internal class Program
         }
     }
 
-    private static void DiscoverSerialPorts()
+    private static async Task DiscoverSerialDevicesAsync(int timeoutSeconds)
     {
-        var ports = SerialStreamTransport.GetAvailablePortNames();
+        Console.WriteLine("Discovering serial devices (this may take a moment)...");
 
-        Console.WriteLine("Available serial ports:");
-        if (ports.Length == 0)
+        using var finder = new SerialDeviceFinder();
+        var timeout = TimeSpan.FromSeconds(timeoutSeconds <= 0 ? 30 : timeoutSeconds);
+
+        finder.DeviceDiscovered += (_, args) =>
         {
-            Console.WriteLine("  (none found)");
+            Console.WriteLine($"  Found: {args.DeviceInfo.Name} ({args.DeviceInfo.PortName}) " +
+                              $"SN:{args.DeviceInfo.SerialNumber} FW:{args.DeviceInfo.FirmwareVersion}");
+        };
+
+        var devices = await finder.DiscoverAsync(timeout);
+
+        Console.WriteLine();
+        Console.WriteLine($"Discovered {devices.Count()} DAQiFi device(s):");
+        if (!devices.Any())
+        {
+            Console.WriteLine("  (no DAQiFi devices found)");
+            Console.WriteLine();
+            Console.WriteLine("Available serial ports (not verified as DAQiFi devices):");
+            var ports = SerialStreamTransport.GetAvailablePortNames();
+            if (ports.Length == 0)
+            {
+                Console.WriteLine("  (none)");
+            }
+            else
+            {
+                foreach (var port in ports)
+                {
+                    Console.WriteLine($"  - {port}");
+                }
+            }
         }
         else
         {
-            foreach (var port in ports)
+            foreach (var device in devices)
             {
-                Console.WriteLine($"  - {port}");
+                Console.WriteLine($"  - {device.Name} ({device.PortName}) SN:{device.SerialNumber} FW:{device.FirmwareVersion}");
             }
         }
     }
