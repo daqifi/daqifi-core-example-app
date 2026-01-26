@@ -13,6 +13,7 @@ namespace Daqifi.Core.Cli;
 internal class Program
 {
     private const int DefaultPort = 9760;
+    private const int DefaultBaudRate = 115200;
     private const int DefaultRate = 100;
     private const int DefaultDurationSeconds = 10;
     private const int DefaultConnectTimeoutSeconds = 5;
@@ -42,23 +43,41 @@ internal class Program
             await DiscoverAsync(options.DiscoveryTimeoutSeconds);
         }
 
-        if (string.IsNullOrWhiteSpace(options.IpAddress))
+        if (options.DiscoverSerial)
         {
-            if (options.Discover)
+            DiscoverSerialPorts();
+        }
+
+        // Check if we have a connection target (IP or serial)
+        var hasIpTarget = !string.IsNullOrWhiteSpace(options.IpAddress);
+        var hasSerialTarget = !string.IsNullOrWhiteSpace(options.SerialPort);
+
+        if (!hasIpTarget && !hasSerialTarget)
+        {
+            if (options.Discover || options.DiscoverSerial)
             {
                 return 0;
             }
 
-            Console.Error.WriteLine("Missing required option: --ip");
+            Console.Error.WriteLine("Missing required option: --ip or --serial");
             Console.Error.WriteLine("Use --help to see available options.");
             return 1;
         }
 
-        var ipAddress = options.IpAddress.Trim();
-        if (!IPAddress.TryParse(ipAddress, out _))
+        if (hasIpTarget && hasSerialTarget)
         {
-            Console.Error.WriteLine($"Invalid IP address: {ipAddress}");
+            Console.Error.WriteLine("Cannot specify both --ip and --serial. Use one or the other.");
             return 1;
+        }
+
+        if (hasIpTarget)
+        {
+            var ipAddress = options.IpAddress!.Trim();
+            if (!IPAddress.TryParse(ipAddress, out _))
+            {
+                Console.Error.WriteLine($"Invalid IP address: {ipAddress}");
+                return 1;
+            }
         }
 
         return await RunStreamingSessionAsync(options);
@@ -77,10 +96,28 @@ internal class Program
             }
         };
 
-        using var device = await DaqifiDeviceFactory.ConnectTcpAsync(
-            options.IpAddress!,
-            options.Port,
-            connectionOptions);
+        // Connect via TCP or Serial based on provided options
+        DaqifiDevice device;
+        string connectionDescription;
+
+        if (!string.IsNullOrWhiteSpace(options.SerialPort))
+        {
+            device = await DaqifiDeviceFactory.ConnectSerialAsync(
+                options.SerialPort,
+                options.BaudRate,
+                connectionOptions);
+            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+        }
+        else
+        {
+            device = await DaqifiDeviceFactory.ConnectTcpAsync(
+                options.IpAddress!,
+                options.Port,
+                connectionOptions);
+            connectionDescription = $"{options.IpAddress}:{options.Port}";
+        }
+
+        using var _ = device;
         using var outputWriter = CreateOutputWriter(options);
 
         device.StatusChanged += (_, eventArgs) =>
@@ -136,7 +173,7 @@ internal class Program
 
         try
         {
-            Console.WriteLine($"Connected to {options.IpAddress}:{options.Port}");
+            Console.WriteLine($"Connected to {connectionDescription}");
 
             if (!string.IsNullOrWhiteSpace(options.ChannelMask))
             {
@@ -200,10 +237,28 @@ internal class Program
         var timeout = TimeSpan.FromSeconds(timeoutSeconds <= 0 ? 5 : timeoutSeconds);
         var devices = await finder.DiscoverAsync(timeout);
 
-        Console.WriteLine("Discovered devices:");
+        Console.WriteLine("Discovered WiFi devices:");
         foreach (var device in devices)
         {
-            Console.WriteLine($"- {device.Name} ({device.IPAddress}:{device.Port}) SN:{device.SerialNumber}");
+            Console.WriteLine($"  - {device.Name} ({device.IPAddress}:{device.Port}) SN:{device.SerialNumber}");
+        }
+    }
+
+    private static void DiscoverSerialPorts()
+    {
+        var ports = SerialStreamTransport.GetAvailablePortNames();
+
+        Console.WriteLine("Available serial ports:");
+        if (ports.Length == 0)
+        {
+            Console.WriteLine("  (none found)");
+        }
+        else
+        {
+            foreach (var port in ports)
+            {
+                Console.WriteLine($"  - {port}");
+            }
         }
     }
 
@@ -340,23 +395,35 @@ internal class Program
         Console.WriteLine();
         Console.WriteLine("Usage:");
         Console.WriteLine("  dotnet run -- --ip <address> [options]");
+        Console.WriteLine("  dotnet run -- --serial <port> [options]");
         Console.WriteLine();
-        Console.WriteLine("Options:");
-        Console.WriteLine("  -d, --discover           Discover devices over UDP before connecting.");
-        Console.WriteLine("  --ip <address>           Device IP address.");
+        Console.WriteLine("Connection Options:");
+        Console.WriteLine("  --ip <address>           Device IP address (for TCP/WiFi connection).");
         Console.WriteLine($"  --port <number>          TCP port (default: {DefaultPort}).");
+        Console.WriteLine("  --serial <port>          Serial port name (e.g., COM3, /dev/ttyUSB0, /dev/cu.usbmodem101).");
+        Console.WriteLine($"  --baud <rate>            Baud rate for serial connection (default: {DefaultBaudRate}).");
+        Console.WriteLine();
+        Console.WriteLine("Discovery Options:");
+        Console.WriteLine("  -d, --discover           Discover WiFi devices over UDP.");
+        Console.WriteLine("  --discover-serial        List available serial ports.");
+        Console.WriteLine("  --discover-timeout <s>   WiFi discovery timeout in seconds (default: 5).");
+        Console.WriteLine();
+        Console.WriteLine("Streaming Options:");
         Console.WriteLine($"  --rate <hz>              Streaming rate in Hz (default: {DefaultRate}).");
         Console.WriteLine($"  --duration <seconds>     Duration to stream (default: {DefaultDurationSeconds}).");
         Console.WriteLine("  --channels <mask>        Enable ADC channels with a 0/1 mask.");
         Console.WriteLine("  --limit <count>          Stop after N stream messages.");
         Console.WriteLine("  --min-samples <count>    Require at least N stream messages (exit code 2 on failure).");
+        Console.WriteLine();
+        Console.WriteLine("Output Options:");
         Console.WriteLine("  --format <text|csv|jsonl> Output format for stream samples (default: text).");
         Console.WriteLine("  --output <path>          Write samples to file instead of stdout.");
-        Console.WriteLine($"  --connect-timeout <s>    TCP connect timeout in seconds (default: {DefaultConnectTimeoutSeconds}).");
-        Console.WriteLine("  --connect-attempts <n>   Total TCP connect attempts (default: 1).");
-        Console.WriteLine("  --keep-connected         Keep TCP connection open after streaming stops.");
         Console.WriteLine("  --show-status            Print protobuf status messages when received.");
-        Console.WriteLine("  --discover-timeout <s>   Discovery timeout in seconds (default: 5).");
+        Console.WriteLine();
+        Console.WriteLine("Advanced Options:");
+        Console.WriteLine($"  --connect-timeout <s>    Connect timeout in seconds (default: {DefaultConnectTimeoutSeconds}).");
+        Console.WriteLine("  --connect-attempts <n>   Total connect attempts (default: 1).");
+        Console.WriteLine("  --keep-connected         Keep connection open after streaming stops.");
         Console.WriteLine("  -h, --help               Show this help.");
     }
 
@@ -383,8 +450,11 @@ internal class Program
     private sealed class CliOptions
     {
         public bool Discover { get; private set; }
+        public bool DiscoverSerial { get; private set; }
         public string? IpAddress { get; private set; }
         public int Port { get; private set; } = DefaultPort;
+        public string? SerialPort { get; private set; }
+        public int BaudRate { get; private set; } = DefaultBaudRate;
         public int SampleRate { get; private set; } = DefaultRate;
         public int DurationSeconds { get; private set; } = DefaultDurationSeconds;
         public string? ChannelMask { get; private set; }
@@ -414,11 +484,20 @@ internal class Program
                     case "--discover":
                         options.Discover = true;
                         break;
+                    case "--discover-serial":
+                        options.DiscoverSerial = true;
+                        break;
                     case "--ip":
                         options.IpAddress = GetValue(args, ref i, arg, options.Errors);
                         break;
                     case "--port":
                         options.Port = GetIntValue(args, ref i, arg, options.Errors, DefaultPort);
+                        break;
+                    case "--serial":
+                        options.SerialPort = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--baud":
+                        options.BaudRate = GetIntValue(args, ref i, arg, options.Errors, DefaultBaudRate);
                         break;
                     case "--rate":
                         options.SampleRate = GetIntValue(args, ref i, arg, options.Errors, DefaultRate);
