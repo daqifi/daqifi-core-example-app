@@ -13,7 +13,7 @@ namespace Daqifi.Core.Cli;
 internal class Program
 {
     private const int DefaultPort = 9760;
-    private const int DefaultBaudRate = 115200;
+    private const int DefaultBaudRate = 9600;
     private const int DefaultRate = 100;
     private const int DefaultDurationSeconds = 10;
     private const int DefaultConnectTimeoutSeconds = 5;
