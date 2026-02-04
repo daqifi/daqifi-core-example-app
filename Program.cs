@@ -7,6 +7,7 @@ using Daqifi.Core.Communication.Transport;
 using Daqifi.Core.Device;
 using Daqifi.Core.Device.Discovery;
 using Daqifi.Core.Device.Protocol;
+using Daqifi.Core.Device.SdCard;
 
 namespace Daqifi.Core.Cli;
 
@@ -78,6 +79,12 @@ internal class Program
                 Console.Error.WriteLine($"Invalid IP address: {ipAddress}");
                 return 1;
             }
+        }
+
+        // Route to SD card operations if any SD card flags are set
+        if (options.SdList || options.SdLogStart || options.SdLogStop)
+        {
+            return await RunSdCardOperationAsync(options);
         }
 
         return await RunStreamingSessionAsync(options);
@@ -297,6 +304,132 @@ internal class Program
         }
     }
 
+    private static async Task<int> RunSdCardOperationAsync(CliOptions options)
+    {
+        var connectionOptions = new DeviceConnectionOptions
+        {
+            ConnectionRetry = new ConnectionRetryOptions
+            {
+                Enabled = options.ConnectAttempts > 1,
+                MaxAttempts = Math.Max(1, options.ConnectAttempts),
+                ConnectionTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds)
+            }
+        };
+
+        DaqifiDevice device;
+        string connectionDescription;
+
+        if (!string.IsNullOrWhiteSpace(options.SerialPort))
+        {
+            device = await DaqifiDeviceFactory.ConnectSerialAsync(
+                options.SerialPort,
+                options.BaudRate,
+                connectionOptions);
+            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+        }
+        else
+        {
+            device = await DaqifiDeviceFactory.ConnectTcpAsync(
+                options.IpAddress!,
+                options.Port,
+                connectionOptions);
+            connectionDescription = $"{options.IpAddress}:{options.Port}";
+        }
+
+        using var _ = device;
+
+        try
+        {
+            Console.WriteLine($"Connected to {connectionDescription}");
+
+            if (device is not DaqifiStreamingDevice streamingDevice)
+            {
+                Console.Error.WriteLine("SD card operations require a streaming device.");
+                return 1;
+            }
+
+            await streamingDevice.InitializeAsync();
+
+            if (options.SdList)
+            {
+                Console.WriteLine("Listing SD card files...");
+                var files = await streamingDevice.GetSdCardFilesAsync();
+
+                if (files.Count == 0)
+                {
+                    Console.WriteLine("  (no files found)");
+                }
+                else
+                {
+                    foreach (var file in files)
+                    {
+                        var dateStr = file.CreatedDate?.ToString("yyyy-MM-dd HH:mm:ss") ?? "unknown date";
+                        Console.WriteLine($"  {file.FileName}  ({dateStr})");
+                    }
+                }
+
+                Console.WriteLine($"Total: {files.Count} file(s)");
+            }
+            else if (options.SdLogStart)
+            {
+                await streamingDevice.StartSdCardLoggingAsync();
+                Console.WriteLine("SD card logging started.");
+
+                if (options.DurationSeconds > 0)
+                {
+                    using var cts = new CancellationTokenSource();
+                    cts.CancelAfter(TimeSpan.FromSeconds(options.DurationSeconds));
+
+                    Console.CancelKeyPress += (_, eventArgs) =>
+                    {
+                        eventArgs.Cancel = true;
+                        cts.Cancel();
+                    };
+
+                    try
+                    {
+                        Console.WriteLine($"Logging for {options.DurationSeconds} seconds (Ctrl+C to stop early)...");
+                        await Task.Delay(Timeout.InfiniteTimeSpan, cts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Expected
+                    }
+
+                    await streamingDevice.StopSdCardLoggingAsync();
+                    Console.WriteLine("SD card logging stopped.");
+                }
+                else
+                {
+                    Console.WriteLine("Use --sd-log-stop to stop logging.");
+                }
+            }
+            else if (options.SdLogStop)
+            {
+                await streamingDevice.StopSdCardLoggingAsync();
+                Console.WriteLine("SD card logging stopped.");
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {FormatException(ex)}");
+            return 1;
+        }
+        finally
+        {
+            try
+            {
+                device.Disconnect();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Disconnect error: {FormatException(ex)}");
+            }
+        }
+    }
+
     private static bool IsStreamLikeMessage(DaqifiOutMessage message)
     {
         return message.AnalogInData.Count > 0 ||
@@ -455,6 +588,11 @@ internal class Program
         Console.WriteLine("  --output <path>          Write samples to file instead of stdout.");
         Console.WriteLine("  --show-status            Print protobuf status messages when received.");
         Console.WriteLine();
+        Console.WriteLine("SD Card Options:");
+        Console.WriteLine("  --sd-list                List files on the SD card.");
+        Console.WriteLine("  --sd-log-start           Start SD card logging (use --duration to auto-stop).");
+        Console.WriteLine("  --sd-log-stop            Stop SD card logging.");
+        Console.WriteLine();
         Console.WriteLine("Advanced Options:");
         Console.WriteLine($"  --connect-timeout <s>    Connect timeout in seconds (default: {DefaultConnectTimeoutSeconds}).");
         Console.WriteLine("  --connect-attempts <n>   Total connect attempts (default: 1).");
@@ -504,6 +642,9 @@ internal class Program
         public bool ShowHelp { get; private set; }
         public int DiscoveryTimeoutSeconds { get; private set; } = 5;
         public bool EmitCsvHeader { get; set; }
+        public bool SdList { get; private set; }
+        public bool SdLogStart { get; private set; }
+        public bool SdLogStop { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -569,6 +710,15 @@ internal class Program
                         break;
                     case "--show-status":
                         options.ShowStatusMessages = true;
+                        break;
+                    case "--sd-list":
+                        options.SdList = true;
+                        break;
+                    case "--sd-log-start":
+                        options.SdLogStart = true;
+                        break;
+                    case "--sd-log-stop":
+                        options.SdLogStop = true;
                         break;
                     case "-h":
                     case "--help":

@@ -5,7 +5,8 @@ This is a lightweight CLI that demonstrates how to use `Daqifi.Core` to discover
 ## Requirements
 
 - .NET 8 SDK
-- A DAQiFi device on the same network
+- A DAQiFi device reachable via WiFi or USB/Serial
+- SD card operations require a USB/Serial connection (not available over WiFi)
 
 ## Quick Start
 
@@ -43,6 +44,29 @@ dotnet run -- \
 - `--keep-connected` keep connection open after streaming stops
 - `--show-status` print protobuf status messages
 - `--discover-timeout <seconds>` discovery timeout (default 5)
+- `--sd-list` list files on the SD card (USB/Serial only)
+- `--sd-log-start` start SD card logging (USB/Serial only)
+- `--sd-log-stop` stop SD card logging (USB/Serial only)
+
+## SD Card
+
+List files:
+
+```bash
+dotnet run -- --serial /dev/cu.usbmodem2101 --sd-list
+```
+
+Start logging (auto-stop after 5 seconds):
+
+```bash
+dotnet run -- --serial /dev/cu.usbmodem2101 --sd-log-start --duration 5
+```
+
+Stop logging:
+
+```bash
+dotnet run -- --serial /dev/cu.usbmodem2101 --sd-log-stop
+```
 
 ## Output Formats
 
