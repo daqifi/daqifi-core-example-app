@@ -95,7 +95,8 @@ internal class Program
         }
 
         // Route to SD card operations if any SD card flags are set
-        if (options.SdList || options.SdLogStart || options.SdLogStop)
+        if (options.SdList || options.SdLogStart || options.SdLogStop ||
+            options.SdDeleteFileName != null || options.SdFormat)
         {
             return await RunSdCardOperationAsync(options);
         }
@@ -421,6 +422,35 @@ internal class Program
             {
                 await streamingDevice.StopSdCardLoggingAsync();
                 Console.WriteLine("SD card logging stopped.");
+            }
+            else if (!string.IsNullOrWhiteSpace(options.SdDeleteFileName))
+            {
+                Console.WriteLine($"Deleting SD card file: {options.SdDeleteFileName}");
+                await streamingDevice.DeleteSdCardFileAsync(options.SdDeleteFileName);
+                Console.WriteLine("Delete command sent.");
+
+                Console.WriteLine("Refreshing file list...");
+                var files = streamingDevice.SdCardFiles;
+                foreach (var file in files)
+                {
+                    var dateStr = file.CreatedDate?.ToString("yyyy-MM-dd HH:mm:ss") ?? "unknown date";
+                    Console.WriteLine($"  {file.FileName}  ({dateStr})");
+                }
+                Console.WriteLine($"Total: {files.Count} file(s)");
+            }
+            else if (options.SdFormat)
+            {
+                Console.Write("Are you sure you want to format the SD card? This erases ALL data. (y/N): ");
+                var confirm = Console.ReadLine()?.Trim().ToLowerInvariant();
+                if (confirm == "y")
+                {
+                    await streamingDevice.FormatSdCardAsync();
+                    Console.WriteLine("Format command sent.");
+                }
+                else
+                {
+                    Console.WriteLine("Format canceled.");
+                }
             }
 
             return 0;
@@ -795,6 +825,8 @@ internal class Program
         Console.WriteLine("  --sd-list                List files on the SD card.");
         Console.WriteLine("  --sd-log-start           Start SD card logging (use --duration to auto-stop).");
         Console.WriteLine("  --sd-log-stop            Stop SD card logging.");
+        Console.WriteLine("  --sd-delete <filename>   Delete a file from the SD card.");
+        Console.WriteLine("  --sd-format              Format the SD card (erases all data).");
         Console.WriteLine("  --sd-parse <path>        Parse a .bin log file from the SD card.");
         Console.WriteLine("  --sd-capture-parse <p>   Capture live stream to file, then parse it.");
         Console.WriteLine();
@@ -850,6 +882,8 @@ internal class Program
         public bool SdList { get; private set; }
         public bool SdLogStart { get; private set; }
         public bool SdLogStop { get; private set; }
+        public string? SdDeleteFileName { get; private set; }
+        public bool SdFormat { get; private set; }
         public string? SdParsePath { get; set; }
         public string? CaptureAndParsePath { get; private set; }
         public List<string> Errors { get; } = new();
@@ -926,6 +960,12 @@ internal class Program
                         break;
                     case "--sd-log-stop":
                         options.SdLogStop = true;
+                        break;
+                    case "--sd-delete":
+                        options.SdDeleteFileName = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--sd-format":
+                        options.SdFormat = true;
                         break;
                     case "--sd-parse":
                         options.SdParsePath = GetValue(args, ref i, arg, options.Errors);
