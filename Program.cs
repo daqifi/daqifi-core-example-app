@@ -96,7 +96,7 @@ internal class Program
 
         // Route to SD card operations if any SD card flags are set
         if (options.SdList || options.SdLogStart || options.SdLogStop ||
-            options.SdDeleteFileName != null || options.SdFormat)
+            options.SdDeleteFileName != null || options.SdDownloadFileName != null || options.SdFormat)
         {
             return await RunSdCardOperationAsync(options);
         }
@@ -437,6 +437,32 @@ internal class Program
                     Console.WriteLine($"  {file.FileName}  ({dateStr})");
                 }
                 Console.WriteLine($"Total: {files.Count} file(s)");
+            }
+            else if (!string.IsNullOrWhiteSpace(options.SdDownloadFileName))
+            {
+                Console.WriteLine($"Downloading SD card file: {options.SdDownloadFileName}");
+
+                var progress = new Progress<SdCardTransferProgress>(p =>
+                {
+                    Console.Write($"\r  Received {p.BytesReceived:N0} bytes...");
+                });
+
+                var result = await streamingDevice.DownloadSdCardFileAsync(
+                    options.SdDownloadFileName, progress);
+
+                Console.WriteLine();
+                Console.WriteLine($"Download complete: {result.FileSize:N0} bytes in {result.Duration.TotalSeconds:F1}s");
+
+                if (result.FilePath != null)
+                {
+                    Console.WriteLine($"Saved to: {result.FilePath}");
+
+                    // Offer to parse the downloaded file
+                    Console.WriteLine();
+                    Console.WriteLine("--- Parsing downloaded file ---");
+                    options.SdParsePath = result.FilePath;
+                    return await RunSdCardParseAsync(options);
+                }
             }
             else if (options.SdFormat)
             {
@@ -826,6 +852,7 @@ internal class Program
         Console.WriteLine("  --sd-log-start           Start SD card logging (use --duration to auto-stop).");
         Console.WriteLine("  --sd-log-stop            Stop SD card logging.");
         Console.WriteLine("  --sd-delete <filename>   Delete a file from the SD card.");
+        Console.WriteLine("  --sd-download <filename> Download a file from the SD card (USB/serial only).");
         Console.WriteLine("  --sd-format              Format the SD card (erases all data).");
         Console.WriteLine("  --sd-parse <path>        Parse a .bin log file from the SD card.");
         Console.WriteLine("  --sd-capture-parse <p>   Capture live stream to file, then parse it.");
@@ -883,6 +910,7 @@ internal class Program
         public bool SdLogStart { get; private set; }
         public bool SdLogStop { get; private set; }
         public string? SdDeleteFileName { get; private set; }
+        public string? SdDownloadFileName { get; private set; }
         public bool SdFormat { get; private set; }
         public string? SdParsePath { get; set; }
         public string? CaptureAndParsePath { get; private set; }
@@ -963,6 +991,9 @@ internal class Program
                         break;
                     case "--sd-delete":
                         options.SdDeleteFileName = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--sd-download":
+                        options.SdDownloadFileName = GetValue(args, ref i, arg, options.Errors);
                         break;
                     case "--sd-format":
                         options.SdFormat = true;
