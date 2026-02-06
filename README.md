@@ -47,6 +47,9 @@ dotnet run -- \
 - `--sd-list` list files on the SD card (USB/Serial only)
 - `--sd-log-start` start SD card logging (USB/Serial only)
 - `--sd-log-stop` stop SD card logging (USB/Serial only)
+- `--sd-download <filename>` download a file from the SD card and parse it (USB/Serial only)
+- `--sd-delete <filename>` delete a file from the SD card (USB/Serial only)
+- `--sd-format` format the SD card (USB/Serial only)
 
 ## SD Card
 
@@ -66,6 +69,24 @@ Stop logging:
 
 ```bash
 dotnet run -- --serial /dev/cu.usbmodem2101 --sd-log-stop
+```
+
+Download and parse a file:
+
+```bash
+dotnet run -- --serial /dev/cu.usbmodem2101 --sd-download log_20260206_101851.bin
+```
+
+Delete a file:
+
+```bash
+dotnet run -- --serial /dev/cu.usbmodem2101 --sd-delete log_20260206_101851.bin
+```
+
+Format the SD card:
+
+```bash
+dotnet run -- --serial /dev/cu.usbmodem2101 --sd-format
 ```
 
 ## Output Formats
