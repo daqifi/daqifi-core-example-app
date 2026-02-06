@@ -8,6 +8,7 @@ using Daqifi.Core.Device;
 using Daqifi.Core.Device.Discovery;
 using Daqifi.Core.Device.Protocol;
 using Daqifi.Core.Device.SdCard;
+using Daqifi.Core.Firmware;
 using Google.Protobuf;
 
 namespace Daqifi.Core.Cli;
@@ -54,6 +55,12 @@ internal class Program
         if (!string.IsNullOrWhiteSpace(options.SdParsePath))
         {
             return await RunSdCardParseAsync(options);
+        }
+
+        // Firmware operations are local-only (no device connection needed)
+        if (options.FirmwareCheck || options.FirmwareDownload)
+        {
+            return await RunFirmwareOperationAsync(options);
         }
 
         // Check if we have a connection target (IP or serial)
@@ -689,6 +696,136 @@ internal class Program
         }
     }
 
+    private static async Task<int> RunFirmwareOperationAsync(CliOptions options)
+    {
+        using var httpClient = new HttpClient();
+        var service = new GitHubFirmwareDownloadService(httpClient);
+
+        try
+        {
+            if (options.FirmwareCheck)
+            {
+                if (!string.IsNullOrWhiteSpace(options.FirmwareDeviceVersion))
+                {
+                    // Compare device version against latest
+                    var result = await service.CheckForUpdateAsync(
+                        options.FirmwareDeviceVersion,
+                        options.FirmwareIncludePreRelease);
+
+                    Console.WriteLine($"Device firmware version: {options.FirmwareDeviceVersion}");
+
+                    if (result.LatestRelease != null)
+                    {
+                        Console.WriteLine($"Latest available version: {result.LatestRelease.Version}");
+                        if (result.LatestRelease.IsPreRelease)
+                        {
+                            Console.WriteLine("  (pre-release)");
+                        }
+
+                        if (result.UpdateAvailable)
+                        {
+                            Console.WriteLine("Update available!");
+                            if (result.LatestRelease.ReleaseNotes != null)
+                            {
+                                Console.WriteLine($"Release notes: {result.LatestRelease.ReleaseNotes}");
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine("Device is up to date.");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("No releases found.");
+                    }
+                }
+                else
+                {
+                    // Just show the latest release info
+                    var release = await service.GetLatestReleaseAsync(options.FirmwareIncludePreRelease);
+                    if (release != null)
+                    {
+                        Console.WriteLine($"Latest firmware version: {release.Version}");
+                        Console.WriteLine($"  Tag:          {release.TagName}");
+                        Console.WriteLine($"  Pre-release:  {release.IsPreRelease}");
+                        if (release.AssetFileName != null)
+                        {
+                            Console.WriteLine($"  Asset:        {release.AssetFileName}");
+                        }
+
+                        if (release.AssetSize.HasValue)
+                        {
+                            Console.WriteLine($"  Size:         {release.AssetSize.Value:N0} bytes");
+                        }
+
+                        if (release.PublishedAt.HasValue)
+                        {
+                            Console.WriteLine($"  Published:    {release.PublishedAt.Value:yyyy-MM-dd HH:mm:ss} UTC");
+                        }
+
+                        if (release.ReleaseNotes != null)
+                        {
+                            Console.WriteLine($"  Release notes: {release.ReleaseNotes}");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("No releases found.");
+                    }
+                }
+            }
+
+            if (options.FirmwareDownload)
+            {
+                var downloadDir = options.FirmwareDownloadDir
+                                  ?? Path.Combine(Path.GetTempPath(), "DAQiFi");
+
+                var progress = new Progress<int>(pct =>
+                {
+                    Console.Write($"\r  Downloading... {pct}%");
+                });
+
+                string? filePath;
+                if (!string.IsNullOrWhiteSpace(options.FirmwareTag))
+                {
+                    Console.WriteLine($"Downloading firmware for tag: {options.FirmwareTag}");
+                    filePath = await service.DownloadFirmwareByTagAsync(
+                        options.FirmwareTag, downloadDir, progress);
+                }
+                else
+                {
+                    Console.WriteLine("Downloading latest firmware...");
+                    filePath = await service.DownloadLatestFirmwareAsync(
+                        downloadDir, options.FirmwareIncludePreRelease, progress);
+                }
+
+                Console.WriteLine();
+                if (filePath != null)
+                {
+                    Console.WriteLine($"Downloaded to: {filePath}");
+                }
+                else
+                {
+                    Console.Error.WriteLine("No firmware asset found to download.");
+                    return 1;
+                }
+            }
+
+            return 0;
+        }
+        catch (HttpRequestException ex)
+        {
+            Console.Error.WriteLine($"Network error: {ex.Message}");
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {FormatException(ex)}");
+            return 1;
+        }
+    }
+
     private static bool IsStreamLikeMessage(DaqifiOutMessage message)
     {
         return message.AnalogInData.Count > 0 ||
@@ -857,6 +994,14 @@ internal class Program
         Console.WriteLine("  --sd-parse <path>        Parse a .bin log file from the SD card.");
         Console.WriteLine("  --sd-capture-parse <p>   Capture live stream to file, then parse it.");
         Console.WriteLine();
+        Console.WriteLine("Firmware Options (no device connection needed):");
+        Console.WriteLine("  --firmware-check              Check latest firmware version on GitHub.");
+        Console.WriteLine("  --firmware-download           Download firmware .hex file.");
+        Console.WriteLine("  --firmware-device-version <v> Device version to compare against (e.g., 3.1.0).");
+        Console.WriteLine("  --firmware-tag <tag>          Download a specific release tag (e.g., v3.2.0).");
+        Console.WriteLine("  --firmware-download-dir <dir> Directory to save firmware (default: %TEMP%/DAQiFi).");
+        Console.WriteLine("  --firmware-pre-release        Include pre-release versions.");
+        Console.WriteLine();
         Console.WriteLine("Advanced Options:");
         Console.WriteLine($"  --connect-timeout <s>    Connect timeout in seconds (default: {DefaultConnectTimeoutSeconds}).");
         Console.WriteLine("  --connect-attempts <n>   Total connect attempts (default: 1).");
@@ -914,6 +1059,12 @@ internal class Program
         public bool SdFormat { get; private set; }
         public string? SdParsePath { get; set; }
         public string? CaptureAndParsePath { get; private set; }
+        public bool FirmwareCheck { get; private set; }
+        public bool FirmwareDownload { get; private set; }
+        public string? FirmwareDeviceVersion { get; private set; }
+        public string? FirmwareDownloadDir { get; private set; }
+        public string? FirmwareTag { get; private set; }
+        public bool FirmwareIncludePreRelease { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -1003,6 +1154,24 @@ internal class Program
                         break;
                     case "--sd-capture-parse":
                         options.CaptureAndParsePath = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--firmware-check":
+                        options.FirmwareCheck = true;
+                        break;
+                    case "--firmware-download":
+                        options.FirmwareDownload = true;
+                        break;
+                    case "--firmware-device-version":
+                        options.FirmwareDeviceVersion = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--firmware-download-dir":
+                        options.FirmwareDownloadDir = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--firmware-tag":
+                        options.FirmwareTag = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--firmware-pre-release":
+                        options.FirmwareIncludePreRelease = true;
                         break;
                     case "-h":
                     case "--help":

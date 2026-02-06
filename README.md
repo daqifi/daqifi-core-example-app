@@ -50,6 +50,50 @@ dotnet run -- \
 - `--sd-download <filename>` download a file from the SD card and parse it (USB/Serial only)
 - `--sd-delete <filename>` delete a file from the SD card (USB/Serial only)
 - `--sd-format` format the SD card (USB/Serial only)
+- `--firmware-check` check latest firmware version on GitHub (no device connection needed)
+- `--firmware-download` download firmware `.hex` file (no device connection needed)
+- `--firmware-device-version <version>` device version to compare against (e.g., `3.1.0`)
+- `--firmware-tag <tag>` download a specific release tag (e.g., `v3.2.0`)
+- `--firmware-download-dir <dir>` directory to save firmware (default: `%TEMP%/DAQiFi`)
+- `--firmware-pre-release` include pre-release versions
+
+## Firmware
+
+Check the latest available firmware version:
+
+```bash
+dotnet run -- --firmware-check
+```
+
+Compare a device's firmware version against the latest release:
+
+```bash
+dotnet run -- --firmware-check --firmware-device-version 3.2.0
+```
+
+Download the latest firmware `.hex` file:
+
+```bash
+dotnet run -- --firmware-download
+```
+
+Download a specific firmware version:
+
+```bash
+dotnet run -- --firmware-download --firmware-tag v3.4.3
+```
+
+Download to a custom directory:
+
+```bash
+dotnet run -- --firmware-download --firmware-download-dir /tmp/firmware
+```
+
+Check and download in one command:
+
+```bash
+dotnet run -- --firmware-check --firmware-download --firmware-device-version 3.2.0
+```
 
 ## SD Card
 
