@@ -8,6 +8,7 @@ using Daqifi.Core.Device;
 using Daqifi.Core.Device.Discovery;
 using Daqifi.Core.Device.Protocol;
 using Daqifi.Core.Device.SdCard;
+using Google.Protobuf;
 
 namespace Daqifi.Core.Cli;
 
@@ -49,6 +50,12 @@ internal class Program
             await DiscoverSerialDevicesAsync(options.DiscoveryTimeoutSeconds);
         }
 
+        // SD card file parse is a local-only operation (no device needed)
+        if (!string.IsNullOrWhiteSpace(options.SdParsePath))
+        {
+            return await RunSdCardParseAsync(options);
+        }
+
         // Check if we have a connection target (IP or serial)
         var hasIpTarget = !string.IsNullOrWhiteSpace(options.IpAddress);
         var hasSerialTarget = !string.IsNullOrWhiteSpace(options.SerialPort);
@@ -79,6 +86,12 @@ internal class Program
                 Console.Error.WriteLine($"Invalid IP address: {ipAddress}");
                 return 1;
             }
+        }
+
+        // Route to capture-and-parse (captures live stream, then parses as SD card file)
+        if (!string.IsNullOrWhiteSpace(options.CaptureAndParsePath))
+        {
+            return await RunCaptureAndParseAsync(options);
         }
 
         // Route to SD card operations if any SD card flags are set
@@ -430,6 +443,192 @@ internal class Program
         }
     }
 
+    private static async Task<int> RunSdCardParseAsync(CliOptions options)
+    {
+        var filePath = options.SdParsePath!;
+        if (!File.Exists(filePath))
+        {
+            Console.Error.WriteLine($"File not found: {filePath}");
+            return 1;
+        }
+
+        Console.WriteLine($"Parsing SD card log file: {filePath}");
+
+        var parser = new SdCardFileParser();
+        var parseOptions = new SdCardParseOptions
+        {
+            Progress = new Progress<SdCardParseProgress>(p =>
+            {
+                var pct = p.TotalBytes > 0
+                    ? (p.BytesRead * 100 / p.TotalBytes).ToString(CultureInfo.InvariantCulture)
+                    : "?";
+                Console.Write($"\r  {pct}% — {p.MessagesRead} messages read ({p.BytesRead} bytes)");
+            })
+        };
+
+        try
+        {
+            var session = await parser.ParseFileAsync(filePath, parseOptions);
+            Console.WriteLine();
+
+            Console.WriteLine($"File: {session.FileName}");
+            if (session.FileCreatedDate.HasValue)
+            {
+                Console.WriteLine($"Created: {session.FileCreatedDate.Value:yyyy-MM-dd HH:mm:ss}");
+            }
+
+            if (session.DeviceConfig != null)
+            {
+                var cfg = session.DeviceConfig;
+                Console.WriteLine($"Device Config:");
+                Console.WriteLine($"  Analog ports:     {cfg.AnalogPortCount}");
+                Console.WriteLine($"  Digital ports:    {cfg.DigitalPortCount}");
+                Console.WriteLine($"  Timestamp freq:   {cfg.TimestampFrequency} Hz");
+                if (cfg.FirmwareRevision != null) Console.WriteLine($"  Firmware:         {cfg.FirmwareRevision}");
+                if (cfg.DevicePartNumber != null) Console.WriteLine($"  Part number:      {cfg.DevicePartNumber}");
+                if (cfg.DeviceSerialNumber != null) Console.WriteLine($"  Serial number:    {cfg.DeviceSerialNumber}");
+            }
+
+            var sampleCount = 0;
+            using var outputWriter = CreateOutputWriter(options);
+
+            await foreach (var sample in session.Samples)
+            {
+                sampleCount++;
+
+                if (options.MessageLimit > 0 && sampleCount > options.MessageLimit)
+                {
+                    break;
+                }
+
+                var analogStr = string.Join(", ",
+                    sample.AnalogValues.Select(v => v.ToString("F3", CultureInfo.InvariantCulture)));
+                outputWriter.WriteLine(
+                    $"[{sample.Timestamp:HH:mm:ss.fff}] analog=[{analogStr}] digital=0x{sample.DigitalData:X}");
+            }
+
+            Console.WriteLine($"Total samples: {sampleCount}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error parsing file: {FormatException(ex)}");
+            return 1;
+        }
+    }
+
+    /// <summary>
+    /// Captures raw protobuf stream data from device to a local .bin file,
+    /// then parses it with the SD card file parser.
+    /// </summary>
+    private static async Task<int> RunCaptureAndParseAsync(CliOptions options)
+    {
+        var connectionOptions = new DeviceConnectionOptions
+        {
+            ConnectionRetry = new ConnectionRetryOptions
+            {
+                Enabled = options.ConnectAttempts > 1,
+                MaxAttempts = Math.Max(1, options.ConnectAttempts),
+                ConnectionTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds)
+            }
+        };
+
+        DaqifiDevice device;
+        string connectionDescription;
+
+        if (!string.IsNullOrWhiteSpace(options.SerialPort))
+        {
+            device = await DaqifiDeviceFactory.ConnectSerialAsync(
+                options.SerialPort,
+                options.BaudRate,
+                connectionOptions);
+            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+        }
+        else
+        {
+            device = await DaqifiDeviceFactory.ConnectTcpAsync(
+                options.IpAddress!,
+                options.Port,
+                connectionOptions);
+            connectionDescription = $"{options.IpAddress}:{options.Port}";
+        }
+
+        using var _ = device;
+        var capturePath = options.CaptureAndParsePath!;
+
+        try
+        {
+            Console.WriteLine($"Connected to {connectionDescription}");
+            Console.WriteLine($"Capturing raw stream to: {capturePath}");
+
+            await using var captureStream = new FileStream(capturePath, FileMode.Create, FileAccess.Write, FileShare.Read);
+            var messageCount = 0;
+            var statusCaptured = false;
+
+            using var stopCts = new CancellationTokenSource();
+            if (options.DurationSeconds > 0)
+            {
+                stopCts.CancelAfter(TimeSpan.FromSeconds(options.DurationSeconds));
+            }
+
+            device.MessageReceived += (_, eventArgs) =>
+            {
+                if (stopCts.IsCancellationRequested) return;
+                if (eventArgs.Message.Data is not DaqifiOutMessage message) return;
+
+                // Write varint-prefixed protobuf to file
+                var payload = message.ToByteArray();
+                var coded = new Google.Protobuf.CodedOutputStream(captureStream, leaveOpen: true);
+                coded.WriteLength(payload.Length);
+                coded.Flush();
+                captureStream.Write(payload, 0, payload.Length);
+                captureStream.Flush();
+
+                var msgType = ProtobufProtocolHandler.DetectMessageType(message);
+                if (msgType == ProtobufMessageType.Status) statusCaptured = true;
+
+                Interlocked.Increment(ref messageCount);
+                Console.Write($"\r  Captured {messageCount} messages (status: {(statusCaptured ? "yes" : "no")})");
+            };
+
+            Console.CancelKeyPress += (_, eventArgs) =>
+            {
+                eventArgs.Cancel = true;
+                stopCts.Cancel();
+            };
+
+            device.Send(ScpiMessageProducer.StartStreaming(options.SampleRate));
+            Console.WriteLine($"Streaming at {options.SampleRate} Hz for {options.DurationSeconds}s...");
+
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, stopCts.Token);
+            }
+            catch (OperationCanceledException) { }
+
+            device.Send(ScpiMessageProducer.StopStreaming);
+            await Task.Delay(500); // Let final messages arrive
+            Console.WriteLine();
+            Console.WriteLine($"Capture complete: {messageCount} messages written to {capturePath}");
+
+            // Now parse the captured file
+            Console.WriteLine();
+            Console.WriteLine("--- Parsing captured file ---");
+            options.SdParsePath = capturePath;
+            return await RunSdCardParseAsync(options);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {FormatException(ex)}");
+            return 1;
+        }
+        finally
+        {
+            try { device.Disconnect(); }
+            catch (Exception ex) { Console.Error.WriteLine($"Disconnect error: {FormatException(ex)}"); }
+        }
+    }
+
     private static bool IsStreamLikeMessage(DaqifiOutMessage message)
     {
         return message.AnalogInData.Count > 0 ||
@@ -592,6 +791,8 @@ internal class Program
         Console.WriteLine("  --sd-list                List files on the SD card.");
         Console.WriteLine("  --sd-log-start           Start SD card logging (use --duration to auto-stop).");
         Console.WriteLine("  --sd-log-stop            Stop SD card logging.");
+        Console.WriteLine("  --sd-parse <path>        Parse a .bin log file from the SD card.");
+        Console.WriteLine("  --sd-capture-parse <p>   Capture live stream to file, then parse it.");
         Console.WriteLine();
         Console.WriteLine("Advanced Options:");
         Console.WriteLine($"  --connect-timeout <s>    Connect timeout in seconds (default: {DefaultConnectTimeoutSeconds}).");
@@ -645,6 +846,8 @@ internal class Program
         public bool SdList { get; private set; }
         public bool SdLogStart { get; private set; }
         public bool SdLogStop { get; private set; }
+        public string? SdParsePath { get; set; }
+        public string? CaptureAndParsePath { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -719,6 +922,12 @@ internal class Program
                         break;
                     case "--sd-log-stop":
                         options.SdLogStop = true;
+                        break;
+                    case "--sd-parse":
+                        options.SdParsePath = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--sd-capture-parse":
+                        options.CaptureAndParsePath = GetValue(args, ref i, arg, options.Errors);
                         break;
                     case "-h":
                     case "--help":
