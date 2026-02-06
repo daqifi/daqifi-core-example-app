@@ -571,21 +571,25 @@ internal class Program
                 stopCts.CancelAfter(TimeSpan.FromSeconds(options.DurationSeconds));
             }
 
+            var captureLock = new object();
             device.MessageReceived += (_, eventArgs) =>
             {
                 if (stopCts.IsCancellationRequested) return;
                 if (eventArgs.Message.Data is not DaqifiOutMessage message) return;
 
-                // Write varint-prefixed protobuf to file
-                var payload = message.ToByteArray();
-                var coded = new Google.Protobuf.CodedOutputStream(captureStream, leaveOpen: true);
-                coded.WriteLength(payload.Length);
-                coded.Flush();
-                captureStream.Write(payload, 0, payload.Length);
-                captureStream.Flush();
+                lock (captureLock)
+                {
+                    // Write varint-prefixed protobuf to file
+                    var payload = message.ToByteArray();
+                    var coded = new Google.Protobuf.CodedOutputStream(captureStream, leaveOpen: true);
+                    coded.WriteLength(payload.Length);
+                    coded.Flush();
+                    captureStream.Write(payload, 0, payload.Length);
+                    captureStream.Flush();
 
-                var msgType = ProtobufProtocolHandler.DetectMessageType(message);
-                if (msgType == ProtobufMessageType.Status) statusCaptured = true;
+                    var msgType = ProtobufProtocolHandler.DetectMessageType(message);
+                    if (msgType == ProtobufMessageType.Status) statusCaptured = true;
+                }
 
                 Interlocked.Increment(ref messageCount);
                 Console.Write($"\r  Captured {messageCount} messages (status: {(statusCaptured ? "yes" : "no")})");
