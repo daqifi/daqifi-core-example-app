@@ -393,7 +393,11 @@ internal class Program
             }
             else if (options.SdLogStart)
             {
-                await streamingDevice.StartSdCardLoggingAsync(format: options.SdLogFormat);
+                streamingDevice.StreamingFrequency = options.SampleRate;
+
+                await streamingDevice.StartSdCardLoggingAsync(
+                    channelMask: options.ChannelMask,
+                    format: options.SdLogFormat);
                 Console.WriteLine("SD card logging started.");
 
                 if (options.DurationSeconds > 0)
@@ -465,11 +469,15 @@ internal class Program
                 {
                     Console.WriteLine($"Saved to: {result.FilePath}");
 
-                    // Offer to parse the downloaded file
-                    Console.WriteLine();
-                    Console.WriteLine("--- Parsing downloaded file ---");
-                    options.SdParsePath = result.FilePath;
-                    return await RunSdCardParseAsync(options);
+                    // Only attempt to parse Protobuf (.bin) files
+                    var downloadExt = Path.GetExtension(result.FilePath).ToLowerInvariant();
+                    if (downloadExt == ".bin")
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine("--- Parsing downloaded file ---");
+                        options.SdParsePath = result.FilePath;
+                        return await RunSdCardParseAsync(options);
+                    }
                 }
             }
             else if (options.SdFormat)
