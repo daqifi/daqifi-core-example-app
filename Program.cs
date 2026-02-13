@@ -88,6 +88,12 @@ internal class Program
             }
         }
 
+        // Route to init diagnosis
+        if (options.DiagnoseInit)
+        {
+            return await RunDiagnoseInitAsync(options);
+        }
+
         // Route to capture-and-parse (captures live stream, then parses as SD card file)
         if (!string.IsNullOrWhiteSpace(options.CaptureAndParsePath))
         {
@@ -378,7 +384,8 @@ internal class Program
                     foreach (var file in files)
                     {
                         var dateStr = file.CreatedDate?.ToString("yyyy-MM-dd HH:mm:ss") ?? "unknown date";
-                        Console.WriteLine($"  {file.FileName}  ({dateStr})");
+                        var formatStr = GetLogFormatLabel(file.FileName);
+                        Console.WriteLine($"  {file.FileName,-35} {dateStr}  [{formatStr}]");
                     }
                 }
 
@@ -386,7 +393,7 @@ internal class Program
             }
             else if (options.SdLogStart)
             {
-                await streamingDevice.StartSdCardLoggingAsync();
+                await streamingDevice.StartSdCardLoggingAsync(format: options.SdLogFormat);
                 Console.WriteLine("SD card logging started.");
 
                 if (options.DurationSeconds > 0)
@@ -434,7 +441,8 @@ internal class Program
                 foreach (var file in files)
                 {
                     var dateStr = file.CreatedDate?.ToString("yyyy-MM-dd HH:mm:ss") ?? "unknown date";
-                    Console.WriteLine($"  {file.FileName}  ({dateStr})");
+                    var formatStr = GetLogFormatLabel(file.FileName);
+                    Console.WriteLine($"  {file.FileName,-35} {dateStr}  [{formatStr}]");
                 }
                 Console.WriteLine($"Total: {files.Count} file(s)");
             }
@@ -499,12 +507,26 @@ internal class Program
         }
     }
 
+    private static Task<int> RunDiagnoseInitAsync(CliOptions options)
+    {
+        Console.Error.WriteLine("--diagnose-init is not yet implemented in this version of daqifi-core.");
+        return Task.FromResult(1);
+    }
+
     private static async Task<int> RunSdCardParseAsync(CliOptions options)
     {
         var filePath = options.SdParsePath!;
         if (!File.Exists(filePath))
         {
             Console.Error.WriteLine($"File not found: {filePath}");
+            return 1;
+        }
+
+        var ext = Path.GetExtension(filePath).ToLowerInvariant();
+        if (ext != ".bin")
+        {
+            var formatLabel = GetLogFormatLabel(filePath);
+            Console.Error.WriteLine($"Cannot parse {formatLabel} files ({ext}) — only Protobuf (.bin) parsing is currently supported.");
             return 1;
         }
 
@@ -803,6 +825,17 @@ internal class Program
         return new PrefixedWriter(writer, options);
     }
 
+    private static string GetLogFormatLabel(string fileName)
+    {
+        return Path.GetExtension(fileName).ToLowerInvariant() switch
+        {
+            ".bin" => "Protobuf",
+            ".json" => "JSON",
+            ".csv" => "CSV",
+            _ => "Unknown"
+        };
+    }
+
     private static bool IsValidChannelMask(string channelMask)
     {
         foreach (var value in channelMask)
@@ -850,12 +883,16 @@ internal class Program
         Console.WriteLine("SD Card Options:");
         Console.WriteLine("  --sd-list                List files on the SD card.");
         Console.WriteLine("  --sd-log-start           Start SD card logging (use --duration to auto-stop).");
+        Console.WriteLine("  --sd-log-format <fmt>    Log format: protobuf (default), json, csv.");
         Console.WriteLine("  --sd-log-stop            Stop SD card logging.");
         Console.WriteLine("  --sd-delete <filename>   Delete a file from the SD card.");
         Console.WriteLine("  --sd-download <filename> Download a file from the SD card (USB/serial only).");
         Console.WriteLine("  --sd-format              Format the SD card (erases all data).");
         Console.WriteLine("  --sd-parse <path>        Parse a .bin log file from the SD card.");
         Console.WriteLine("  --sd-capture-parse <p>   Capture live stream to file, then parse it.");
+        Console.WriteLine();
+        Console.WriteLine("Diagnostic Options:");
+        Console.WriteLine("  --diagnose-init          Send each init command individually and report SCPI errors.");
         Console.WriteLine();
         Console.WriteLine("Advanced Options:");
         Console.WriteLine($"  --connect-timeout <s>    Connect timeout in seconds (default: {DefaultConnectTimeoutSeconds}).");
@@ -909,11 +946,13 @@ internal class Program
         public bool SdList { get; private set; }
         public bool SdLogStart { get; private set; }
         public bool SdLogStop { get; private set; }
+        public SdCardLogFormat SdLogFormat { get; private set; } = SdCardLogFormat.Protobuf;
         public string? SdDeleteFileName { get; private set; }
         public string? SdDownloadFileName { get; private set; }
         public bool SdFormat { get; private set; }
         public string? SdParsePath { get; set; }
         public string? CaptureAndParsePath { get; private set; }
+        public bool DiagnoseInit { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -986,6 +1025,9 @@ internal class Program
                     case "--sd-log-start":
                         options.SdLogStart = true;
                         break;
+                    case "--sd-log-format":
+                        options.SdLogFormat = ParseSdLogFormat(GetValue(args, ref i, arg, options.Errors), options.Errors);
+                        break;
                     case "--sd-log-stop":
                         options.SdLogStop = true;
                         break;
@@ -1003,6 +1045,9 @@ internal class Program
                         break;
                     case "--sd-capture-parse":
                         options.CaptureAndParsePath = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--diagnose-init":
+                        options.DiagnoseInit = true;
                         break;
                     case "-h":
                     case "--help":
@@ -1071,6 +1116,23 @@ internal class Program
         {
             errors.Add($"Invalid format: {value}. Use text, csv, or jsonl.");
             return OutputFormat.Text;
+        }
+
+        private static SdCardLogFormat ParseSdLogFormat(string? value, List<string> errors)
+        {
+            return value?.Trim().ToLowerInvariant() switch
+            {
+                "protobuf" or "bin" => SdCardLogFormat.Protobuf,
+                "json" => SdCardLogFormat.Json,
+                "csv" => SdCardLogFormat.Csv,
+                _ => AddSdLogFormatError(errors, value)
+            };
+        }
+
+        private static SdCardLogFormat AddSdLogFormatError(List<string> errors, string? value)
+        {
+            errors.Add($"Invalid SD log format: {value}. Use protobuf, json, or csv.");
+            return SdCardLogFormat.Protobuf;
         }
     }
 
