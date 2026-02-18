@@ -88,12 +88,6 @@ internal class Program
             }
         }
 
-        // Route to init diagnosis
-        if (options.DiagnoseInit)
-        {
-            return await RunDiagnoseInitAsync(options);
-        }
-
         // Route to capture-and-parse (captures live stream, then parses as SD card file)
         if (!string.IsNullOrWhiteSpace(options.CaptureAndParsePath))
         {
@@ -515,12 +509,6 @@ internal class Program
         }
     }
 
-    private static Task<int> RunDiagnoseInitAsync(CliOptions options)
-    {
-        Console.Error.WriteLine("--diagnose-init is not yet implemented in this version of daqifi-core.");
-        return Task.FromResult(1);
-    }
-
     private static async Task<int> RunSdCardParseAsync(CliOptions options)
     {
         var filePath = options.SdParsePath!;
@@ -904,9 +892,6 @@ internal class Program
         Console.WriteLine("  --sd-parse <path>        Parse a .bin log file from the SD card.");
         Console.WriteLine("  --sd-capture-parse <p>   Capture live stream to file, then parse it.");
         Console.WriteLine();
-        Console.WriteLine("Diagnostic Options:");
-        Console.WriteLine("  --diagnose-init          Send each init command individually and report SCPI errors.");
-        Console.WriteLine();
         Console.WriteLine("Advanced Options:");
         Console.WriteLine($"  --connect-timeout <s>    Connect timeout in seconds (default: {DefaultConnectTimeoutSeconds}).");
         Console.WriteLine("  --connect-attempts <n>   Total connect attempts (default: 1).");
@@ -965,7 +950,6 @@ internal class Program
         public bool SdFormat { get; private set; }
         public string? SdParsePath { get; set; }
         public string? CaptureAndParsePath { get; private set; }
-        public bool DiagnoseInit { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -1058,9 +1042,6 @@ internal class Program
                         break;
                     case "--sd-capture-parse":
                         options.CaptureAndParsePath = GetValue(args, ref i, arg, options.Errors);
-                        break;
-                    case "--diagnose-init":
-                        options.DiagnoseInit = true;
                         break;
                     case "-h":
                     case "--help":
