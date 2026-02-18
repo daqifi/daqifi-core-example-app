@@ -530,17 +530,20 @@ internal class Program
             return 1;
         }
 
-        var ext = Path.GetExtension(filePath).ToLowerInvariant();
-        if (ext != ".bin")
+        SdCardLogFormat format;
+        try
         {
-            var formatLabel = GetLogFormatLabel(filePath);
-            Console.Error.WriteLine($"Cannot parse {formatLabel} files ({ext}) — only Protobuf (.bin) parsing is currently supported.");
+            format = SdCardFileParserFactory.DetectFormat(filePath);
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
             return 1;
         }
 
-        Console.WriteLine($"Parsing SD card log file: {filePath}");
+        var formatLabel = GetLogFormatLabel(filePath);
+        Console.WriteLine($"Parsing {formatLabel} SD card log file: {filePath}");
 
-        var parser = new SdCardFileParser();
         var parseOptions = new SdCardParseOptions
         {
             Progress = new Progress<SdCardParseProgress>(p =>
@@ -548,13 +551,15 @@ internal class Program
                 var pct = p.TotalBytes > 0
                     ? (p.BytesRead * 100 / p.TotalBytes).ToString(CultureInfo.InvariantCulture)
                     : "?";
-                Console.Write($"\r  {pct}% — {p.MessagesRead} messages read ({p.BytesRead} bytes)");
-            })
+                var unit = format == SdCardLogFormat.Protobuf ? "messages" : "lines";
+                Console.Write($"\r  {pct}% — {p.MessagesRead} {unit} read ({p.BytesRead} bytes)");
+            }),
+            FallbackTimestampFrequency = 50_000_000  // Default for Nyquist devices
         };
 
         try
         {
-            var session = await parser.ParseFileAsync(filePath, parseOptions);
+            var session = await SdCardFileParserFactory.ParseFileAsync(filePath, parseOptions);
             Console.WriteLine();
 
             Console.WriteLine($"File: {session.FileName}");
