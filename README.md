@@ -50,7 +50,10 @@ dotnet run -- \
 - `--sd-download <filename>` download a file from the SD card and parse it (USB/Serial only)
 - `--sd-delete <filename>` delete a file from the SD card (USB/Serial only)
 - `--sd-format` format the SD card (USB/Serial only)
+- `--fw-download-latest <dir>` download latest PIC32 firmware HEX into `<dir>`
+- `--fw-download-tag <tag> <dir>` download PIC32 firmware HEX for `<tag>` into `<dir>`
 - `--fw-update-hex <path>` run PIC32 firmware update from a local Intel HEX file (USB/Serial only)
+- `--fw-update-latest <dir>` download latest PIC32 firmware HEX to `<dir>`, then run update (USB/Serial only)
 
 ## SD Card
 
@@ -92,6 +95,18 @@ dotnet run -- --serial /dev/cu.usbmodem2101 --sd-format
 
 ## Firmware Update
 
+Download latest PIC32 firmware HEX:
+
+```bash
+dotnet run -- --fw-download-latest /tmp/daqifi-firmware
+```
+
+Download PIC32 firmware HEX for a specific tag:
+
+```bash
+dotnet run -- --fw-download-tag v3.2.0 /tmp/daqifi-firmware
+```
+
 Run a PIC32 firmware update from a local HEX file:
 
 ```bash
@@ -99,6 +114,15 @@ dotnet run -p:DaqifiCoreProjectPath=/path/to/daqifi-core/src/Daqifi.Core/Daqifi.
   --serial /dev/cu.usbmodem101 \
   --baud 9600 \
   --fw-update-hex /path/to/DAQiFi_Nyquist.hex
+```
+
+Download latest PIC32 firmware and update in one command:
+
+```bash
+dotnet run -p:DaqifiCoreProjectPath=/path/to/daqifi-core/src/Daqifi.Core/Daqifi.Core.csproj -- \
+  --serial /dev/cu.usbmodem101 \
+  --baud 9600 \
+  --fw-update-latest /tmp/daqifi-firmware
 ```
 
 The command logs firmware update state transitions and progress to stdout.

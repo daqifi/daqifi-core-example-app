@@ -58,6 +58,16 @@ internal class Program
             return await RunSdCardParseAsync(options);
         }
 
+        if (!string.IsNullOrWhiteSpace(options.FirmwareDownloadLatestDirectory))
+        {
+            return await RunFirmwareDownloadLatestAsync(options);
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.FirmwareDownloadTag))
+        {
+            return await RunFirmwareDownloadByTagAsync(options);
+        }
+
         // Check if we have a connection target (IP or serial)
         var hasIpTarget = !string.IsNullOrWhiteSpace(options.IpAddress);
         var hasSerialTarget = !string.IsNullOrWhiteSpace(options.SerialPort);
@@ -88,6 +98,11 @@ internal class Program
                 Console.Error.WriteLine($"Invalid IP address: {ipAddress}");
                 return 1;
             }
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.FirmwareUpdateLatestDirectory))
+        {
+            return await RunFirmwareUpdateLatestAsync(options);
         }
 
         if (!string.IsNullOrWhiteSpace(options.FirmwareHexPath))
@@ -259,8 +274,17 @@ internal class Program
         }
     }
 
-    private static async Task<int> RunFirmwareUpdateAsync(CliOptions options)
+    private static async Task<int> RunFirmwareUpdateAsync(
+        CliOptions options,
+        string? firmwareHexPathOverride = null)
     {
+        var firmwareHexPath = firmwareHexPathOverride ?? options.FirmwareHexPath;
+        if (string.IsNullOrWhiteSpace(firmwareHexPath))
+        {
+            Console.Error.WriteLine("Firmware update requires a HEX path.");
+            return 1;
+        }
+
         var connectionOptions = new DeviceConnectionOptions
         {
             ConnectionRetry = new ConnectionRetryOptions
@@ -328,10 +352,10 @@ internal class Program
                 return 1;
             }
 
-            Console.WriteLine($"Starting PIC32 firmware update with HEX file: {options.FirmwareHexPath}");
+            Console.WriteLine($"Starting PIC32 firmware update with HEX file: {firmwareHexPath}");
             await firmwareUpdateService.UpdateFirmwareAsync(
                 streamingDevice,
-                options.FirmwareHexPath!,
+                firmwareHexPath,
                 progress);
 
             Console.WriteLine("Firmware update completed successfully.");
@@ -372,6 +396,128 @@ internal class Program
             {
                 Console.Error.WriteLine($"Disconnect error: {FormatException(ex)}");
             }
+        }
+    }
+
+    private static async Task<int> RunFirmwareDownloadLatestAsync(CliOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(options.FirmwareDownloadLatestDirectory))
+        {
+            Console.Error.WriteLine("Missing destination directory for --fw-download-latest.");
+            return 1;
+        }
+
+        using var httpClient = new HttpClient();
+        var downloadService = new GitHubFirmwareDownloadService(httpClient);
+        var progress = new Progress<int>(percent =>
+        {
+            Console.WriteLine($"[Download] {percent,3}%");
+        });
+
+        try
+        {
+            Console.WriteLine("Downloading latest PIC32 firmware...");
+            var downloadedPath = await downloadService.DownloadLatestFirmwareAsync(
+                options.FirmwareDownloadLatestDirectory,
+                progress: progress);
+
+            if (string.IsNullOrWhiteSpace(downloadedPath))
+            {
+                Console.Error.WriteLine("No latest firmware HEX asset found.");
+                return 1;
+            }
+
+            Console.WriteLine($"Downloaded latest firmware HEX: {downloadedPath}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Firmware download failed: {FormatException(ex)}");
+            return 1;
+        }
+    }
+
+    private static async Task<int> RunFirmwareDownloadByTagAsync(CliOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(options.FirmwareDownloadTag))
+        {
+            Console.Error.WriteLine("Missing tag for --fw-download-tag.");
+            return 1;
+        }
+
+        if (string.IsNullOrWhiteSpace(options.FirmwareDownloadTagDirectory))
+        {
+            Console.Error.WriteLine("Missing destination directory for --fw-download-tag.");
+            return 1;
+        }
+
+        using var httpClient = new HttpClient();
+        var downloadService = new GitHubFirmwareDownloadService(httpClient);
+        var progress = new Progress<int>(percent =>
+        {
+            Console.WriteLine($"[Download] {percent,3}%");
+        });
+
+        try
+        {
+            Console.WriteLine($"Downloading PIC32 firmware for tag {options.FirmwareDownloadTag}...");
+            var downloadedPath = await downloadService.DownloadFirmwareByTagAsync(
+                options.FirmwareDownloadTag,
+                options.FirmwareDownloadTagDirectory,
+                progress: progress);
+
+            if (string.IsNullOrWhiteSpace(downloadedPath))
+            {
+                Console.Error.WriteLine(
+                    $"No HEX firmware asset found for tag {options.FirmwareDownloadTag}.");
+                return 1;
+            }
+
+            Console.WriteLine($"Downloaded firmware HEX: {downloadedPath}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Firmware download failed: {FormatException(ex)}");
+            return 1;
+        }
+    }
+
+    private static async Task<int> RunFirmwareUpdateLatestAsync(CliOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(options.FirmwareUpdateLatestDirectory))
+        {
+            Console.Error.WriteLine("Missing destination directory for --fw-update-latest.");
+            return 1;
+        }
+
+        using var httpClient = new HttpClient();
+        var downloadService = new GitHubFirmwareDownloadService(httpClient);
+        var progress = new Progress<int>(percent =>
+        {
+            Console.WriteLine($"[Download] {percent,3}%");
+        });
+
+        try
+        {
+            Console.WriteLine("Downloading latest PIC32 firmware before update...");
+            var downloadedPath = await downloadService.DownloadLatestFirmwareAsync(
+                options.FirmwareUpdateLatestDirectory,
+                progress: progress);
+
+            if (string.IsNullOrWhiteSpace(downloadedPath))
+            {
+                Console.Error.WriteLine("No latest firmware HEX asset found.");
+                return 1;
+            }
+
+            Console.WriteLine($"Downloaded latest firmware HEX: {downloadedPath}");
+            return await RunFirmwareUpdateAsync(options, downloadedPath);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Firmware download/update failed: {FormatException(ex)}");
+            return 1;
         }
     }
 
@@ -1015,8 +1161,13 @@ internal class Program
         Console.WriteLine("  --sd-parse <path>        Parse a .bin log file from the SD card.");
         Console.WriteLine("  --sd-capture-parse <p>   Capture live stream to file, then parse it.");
         Console.WriteLine();
+        Console.WriteLine("Firmware Download Options:");
+        Console.WriteLine("  --fw-download-latest <d> Download latest PIC32 firmware HEX into directory <d>.");
+        Console.WriteLine("  --fw-download-tag <t> <d> Download PIC32 firmware HEX for tag <t> into directory <d>.");
+        Console.WriteLine();
         Console.WriteLine("Firmware Update Options:");
         Console.WriteLine("  --fw-update-hex <path>   Run PIC32 firmware update from a local Intel HEX file.");
+        Console.WriteLine("  --fw-update-latest <d>   Download latest PIC32 firmware HEX to <d>, then update.");
         Console.WriteLine();
         Console.WriteLine("Advanced Options:");
         Console.WriteLine($"  --connect-timeout <s>    Connect timeout in seconds (default: {DefaultConnectTimeoutSeconds}).");
@@ -1076,7 +1227,11 @@ internal class Program
         public bool SdFormat { get; private set; }
         public string? SdParsePath { get; set; }
         public string? CaptureAndParsePath { get; private set; }
+        public string? FirmwareDownloadLatestDirectory { get; private set; }
+        public string? FirmwareDownloadTag { get; private set; }
+        public string? FirmwareDownloadTagDirectory { get; private set; }
         public string? FirmwareHexPath { get; private set; }
+        public string? FirmwareUpdateLatestDirectory { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -1170,8 +1325,24 @@ internal class Program
                     case "--sd-capture-parse":
                         options.CaptureAndParsePath = GetValue(args, ref i, arg, options.Errors);
                         break;
+                    case "--fw-download-latest":
+                        options.FirmwareDownloadLatestDirectory = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--fw-download-tag":
+                    {
+                        options.FirmwareDownloadTag = GetValue(args, ref i, arg, options.Errors);
+                        if (!string.IsNullOrWhiteSpace(options.FirmwareDownloadTag))
+                        {
+                            options.FirmwareDownloadTagDirectory = GetValue(args, ref i, arg, options.Errors);
+                        }
+
+                        break;
+                    }
                     case "--fw-update-hex":
                         options.FirmwareHexPath = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--fw-update-latest":
+                        options.FirmwareUpdateLatestDirectory = GetValue(args, ref i, arg, options.Errors);
                         break;
                     case "-h":
                     case "--help":
@@ -1181,6 +1352,38 @@ internal class Program
                         options.Errors.Add($"Unknown argument: {arg}");
                         break;
                 }
+            }
+
+            var firmwareCommandCount = 0;
+            if (!string.IsNullOrWhiteSpace(options.FirmwareDownloadLatestDirectory))
+            {
+                firmwareCommandCount++;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.FirmwareDownloadTag))
+            {
+                firmwareCommandCount++;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.FirmwareHexPath))
+            {
+                firmwareCommandCount++;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.FirmwareUpdateLatestDirectory))
+            {
+                firmwareCommandCount++;
+            }
+
+            if (firmwareCommandCount > 1)
+            {
+                options.Errors.Add("Specify only one firmware command at a time.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.FirmwareDownloadTag) &&
+                string.IsNullOrWhiteSpace(options.FirmwareDownloadTagDirectory))
+            {
+                options.Errors.Add("Missing destination directory for --fw-download-tag.");
             }
 
             return options;
