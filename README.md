@@ -50,6 +50,7 @@ dotnet run -- \
 - `--sd-download <filename>` download a file from the SD card and parse it (USB/Serial only)
 - `--sd-delete <filename>` delete a file from the SD card (USB/Serial only)
 - `--sd-format` format the SD card (USB/Serial only)
+- `--fw-update-hex <path>` run PIC32 firmware update from a local Intel HEX file (USB/Serial only)
 
 ## SD Card
 
@@ -88,6 +89,19 @@ Format the SD card:
 ```bash
 dotnet run -- --serial /dev/cu.usbmodem2101 --sd-format
 ```
+
+## Firmware Update
+
+Run a PIC32 firmware update from a local HEX file:
+
+```bash
+dotnet run -p:DaqifiCoreProjectPath=/path/to/daqifi-core/src/Daqifi.Core/Daqifi.Core.csproj -- \
+  --serial /dev/cu.usbmodem101 \
+  --baud 9600 \
+  --fw-update-hex /path/to/DAQiFi_Nyquist.hex
+```
+
+The command logs firmware update state transitions and progress to stdout.
 
 ## Output Formats
 
