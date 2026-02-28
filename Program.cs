@@ -123,6 +123,11 @@ internal class Program
             return await RunSdCardOperationAsync(options);
         }
 
+        if (options.LanChipInfo)
+        {
+            return await RunLanChipInfoAsync(options);
+        }
+
         return await RunStreamingSessionAsync(options);
     }
 
@@ -981,6 +986,78 @@ internal class Program
         }
     }
 
+    private static async Task<int> RunLanChipInfoAsync(CliOptions options)
+    {
+        var connectionOptions = new DeviceConnectionOptions
+        {
+            ConnectionRetry = new ConnectionRetryOptions
+            {
+                Enabled = options.ConnectAttempts > 1,
+                MaxAttempts = Math.Max(1, options.ConnectAttempts),
+                ConnectionTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds)
+            }
+        };
+
+        DaqifiDevice device;
+        string connectionDescription;
+
+        if (!string.IsNullOrWhiteSpace(options.SerialPort))
+        {
+            device = await DaqifiDeviceFactory.ConnectSerialAsync(
+                options.SerialPort,
+                options.BaudRate,
+                connectionOptions);
+            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+        }
+        else
+        {
+            device = await DaqifiDeviceFactory.ConnectTcpAsync(
+                options.IpAddress!,
+                options.Port,
+                connectionOptions);
+            connectionDescription = $"{options.IpAddress}:{options.Port}";
+        }
+
+        using var _ = device;
+
+        try
+        {
+            Console.WriteLine($"Connected to {connectionDescription}");
+
+            if (device is not DaqifiStreamingDevice streamingDevice)
+            {
+                Console.Error.WriteLine("LAN chip info query requires a streaming device.");
+                return 1;
+            }
+
+            await streamingDevice.InitializeAsync();
+
+            Console.WriteLine("Querying LAN chip info...");
+            var info = await streamingDevice.GetLanChipInfoAsync();
+
+            if (info == null)
+            {
+                Console.Error.WriteLine("Device did not return a recognizable LAN chip info response.");
+                return 1;
+            }
+
+            Console.WriteLine($"ChipId:    {info.ChipId}");
+            Console.WriteLine($"FwVersion: {info.FwVersion}");
+            Console.WriteLine($"BuildDate: {info.BuildDate}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {FormatException(ex)}");
+            return 1;
+        }
+        finally
+        {
+            try { device.Disconnect(); }
+            catch (Exception ex) { Console.Error.WriteLine($"Disconnect error: {FormatException(ex)}"); }
+        }
+    }
+
     private static bool IsStreamLikeMessage(DaqifiOutMessage message)
     {
         return message.AnalogInData.Count > 0 ||
@@ -1169,6 +1246,9 @@ internal class Program
         Console.WriteLine("  --fw-update-hex <path>   Run PIC32 firmware update from a local Intel HEX file.");
         Console.WriteLine("  --fw-update-latest <d>   Download latest PIC32 firmware HEX to <d>, then update.");
         Console.WriteLine();
+        Console.WriteLine("Device Info Options:");
+        Console.WriteLine("  --lan-chip-info          Query the WiFi module chip ID, firmware version, and build date.");
+        Console.WriteLine();
         Console.WriteLine("Advanced Options:");
         Console.WriteLine($"  --connect-timeout <s>    Connect timeout in seconds (default: {DefaultConnectTimeoutSeconds}).");
         Console.WriteLine("  --connect-attempts <n>   Total connect attempts (default: 1).");
@@ -1232,6 +1312,7 @@ internal class Program
         public string? FirmwareDownloadTagDirectory { get; private set; }
         public string? FirmwareHexPath { get; private set; }
         public string? FirmwareUpdateLatestDirectory { get; private set; }
+        public bool LanChipInfo { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -1343,6 +1424,9 @@ internal class Program
                         break;
                     case "--fw-update-latest":
                         options.FirmwareUpdateLatestDirectory = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--lan-chip-info":
+                        options.LanChipInfo = true;
                         break;
                     case "-h":
                     case "--help":
