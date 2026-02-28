@@ -54,6 +54,7 @@ dotnet run -- \
 - `--fw-download-tag <tag> <dir>` download PIC32 firmware HEX for `<tag>` into `<dir>`
 - `--fw-update-hex <path>` run PIC32 firmware update from a local Intel HEX file (USB/Serial only)
 - `--fw-update-latest <dir>` download latest PIC32 firmware HEX to `<dir>`, then run update (USB/Serial only)
+- `--lan-chip-info` query the WiFi module chip ID, firmware version, and build date (USB/Serial only)
 
 ## SD Card
 
@@ -126,6 +127,25 @@ dotnet run -p:DaqifiCoreProjectPath=/path/to/daqifi-core/src/Daqifi.Core/Daqifi.
 ```
 
 The command logs firmware update state transitions and progress to stdout.
+
+## Device Info
+
+Query the WiFi module chip ID, firmware version, and build date:
+
+```bash
+dotnet run -p:DaqifiCoreProjectPath=/path/to/daqifi-core/src/Daqifi.Core/Daqifi.Core.csproj -- \
+  --serial /dev/cu.usbmodem101 \
+  --lan-chip-info
+```
+
+Example output:
+```
+Connected to /dev/cu.usbmodem101 @ 115200 baud
+Querying LAN chip info...
+ChipId:    1377184
+FwVersion: 19.7.7
+BuildDate: Mar 30 2022
+```
 
 ## Output Formats
 
