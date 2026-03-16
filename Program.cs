@@ -744,7 +744,11 @@ internal class Program
                         Console.WriteLine();
                         Console.WriteLine("--- Parsing downloaded file ---");
                         options.SdParsePath = result.FilePath;
-                        return await RunSdCardParseAsync(options);
+
+                        // Pass the connected device's config so the parser can
+                        // scale raw ADC values using the device's calibration.
+                        var deviceConfig = SdCardDeviceConfiguration.FromDevice(device);
+                        return await RunSdCardParseAsync(options, deviceConfig);
                     }
                 }
             }
@@ -783,7 +787,9 @@ internal class Program
         }
     }
 
-    private static async Task<int> RunSdCardParseAsync(CliOptions options)
+    private static async Task<int> RunSdCardParseAsync(
+        CliOptions options,
+        SdCardDeviceConfiguration? deviceConfig = null)
     {
         var filePath = options.SdParsePath!;
         if (!File.Exists(filePath))
@@ -816,7 +822,7 @@ internal class Program
                 var unit = format == SdCardLogFormat.Protobuf ? "messages" : "lines";
                 Console.Write($"\r  {pct}% — {p.MessagesRead} {unit} read ({p.BytesRead} bytes)");
             }),
-            FallbackTimestampFrequency = 50_000_000  // Default for Nyquist devices
+            ConfigurationOverride = deviceConfig
         };
 
         try
