@@ -714,6 +714,12 @@ internal class Program
                 // capabilities after InitializeAsync) and DIO ports so the log
                 // file is not empty.
                 var channelMask = options.ChannelMask;
+                if (!string.IsNullOrWhiteSpace(channelMask) && !IsValidChannelMask(channelMask))
+                {
+                    Console.Error.WriteLine($"Invalid channel mask: {channelMask}");
+                    return 1;
+                }
+
                 if (string.IsNullOrWhiteSpace(channelMask))
                 {
                     var adcCount = streamingDevice.Metadata.Capabilities.AnalogInputChannels;
