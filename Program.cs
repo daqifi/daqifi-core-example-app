@@ -737,9 +737,9 @@ internal class Program
                 {
                     Console.WriteLine($"Saved to: {result.FilePath}");
 
-                    // Only attempt to parse Protobuf (.bin) files
+                    // Parse the downloaded file (any supported format)
                     var downloadExt = Path.GetExtension(result.FilePath).ToLowerInvariant();
-                    if (downloadExt == ".bin")
+                    if (downloadExt is ".bin" or ".csv" or ".json")
                     {
                         Console.WriteLine();
                         Console.WriteLine("--- Parsing downloaded file ---");
@@ -747,7 +747,7 @@ internal class Program
 
                         // Pass the connected device's config so the parser can
                         // scale raw ADC values using the device's calibration.
-                        var deviceConfig = SdCardDeviceConfiguration.FromDevice(device);
+                        var deviceConfig = SdCardDeviceConfiguration.FromDevice((DaqifiDevice)device);
                         return await RunSdCardParseAsync(options, deviceConfig);
                     }
                 }
