@@ -725,7 +725,7 @@ internal class Program
                     var adcCount = streamingDevice.Metadata.Capabilities.AnalogInputChannels;
                     if (adcCount > 0)
                     {
-                        channelMask = new string('1', adcCount);
+                        channelMask = ((1u << adcCount) - 1).ToString();
                     }
                 }
 
@@ -1289,15 +1289,7 @@ internal class Program
 
     private static bool IsValidChannelMask(string channelMask)
     {
-        foreach (var value in channelMask)
-        {
-            if (value != '0' && value != '1')
-            {
-                return false;
-            }
-        }
-
-        return true;
+        return uint.TryParse(channelMask, out _);
     }
 
     private static void PrintHelp()
@@ -1322,7 +1314,7 @@ internal class Program
         Console.WriteLine("Streaming Options:");
         Console.WriteLine($"  --rate <hz>              Streaming rate in Hz (default: {DefaultRate}).");
         Console.WriteLine($"  --duration <seconds>     Duration to stream (default: {DefaultDurationSeconds}).");
-        Console.WriteLine("  --channels <mask>        Enable ADC channels with a 0/1 mask.");
+        Console.WriteLine("  --channels <mask>        Enable ADC channels with a decimal bitmask (e.g. 7 = ch 0,1,2).");
         Console.WriteLine("  --limit <count>          Stop after N stream messages.");
         Console.WriteLine("  --min-samples <count>    Require at least N stream messages (exit code 2 on failure).");
         Console.WriteLine();
