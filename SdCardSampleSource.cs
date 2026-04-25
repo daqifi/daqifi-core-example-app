@@ -48,9 +48,19 @@ internal sealed class SdCardSampleSource : ISampleSource
     public async IAsyncEnumerable<SampleRow> StreamSamples(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        var truncationWarned = false;
+
         await foreach (var entry in _session.Samples.WithCancellation(cancellationToken))
         {
             var ticks = entry.Timestamp.Ticks;
+            if (!truncationWarned && entry.AnalogValues.Count > _analogKeys.Length)
+            {
+                Console.Error.WriteLine(
+                    $"Warning: sample has {entry.AnalogValues.Count} analog values but configured channel count is " +
+                    $"{_analogKeys.Length}; extra channels will not appear in the CSV.");
+                truncationWarned = true;
+            }
+
             var count = Math.Min(entry.AnalogValues.Count, _analogKeys.Length);
             for (var i = 0; i < count; i++)
             {

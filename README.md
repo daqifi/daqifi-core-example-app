@@ -4,7 +4,7 @@ This is a lightweight CLI that demonstrates how to use `Daqifi.Core` to discover
 
 ## Requirements
 
-- .NET 8 SDK
+- .NET 9 SDK
 - A DAQiFi device reachable via WiFi or USB/Serial
 - SD card operations require a USB/Serial connection (not available over WiFi)
 

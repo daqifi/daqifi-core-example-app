@@ -129,22 +129,6 @@ internal class Program
             return await RunLanChipInfoAsync(options);
         }
 
-        if (options.MimicDesktop)
-        {
-            if (string.IsNullOrWhiteSpace(options.SerialPort))
-            {
-                Console.Error.WriteLine("--mimic-desktop requires --serial.");
-                return 1;
-            }
-            return await DesktopFlowTest.RunAsync(
-                options.SerialPort!,
-                options.MimicDesktopChannels,
-                options.DurationSeconds,
-                options.MimicDesktopFrequency,
-                options.MimicDesktopSendDio,
-                options.MimicDesktopDelayMs);
-        }
-
         return await RunStreamingSessionAsync(options);
     }
 
@@ -1019,7 +1003,7 @@ internal class Program
                 rowsWritten = count;
                 if (stopwatch.Elapsed - lastReport > TimeSpan.FromMilliseconds(250))
                 {
-                    Console.Write($"\r  {count} samples written ({count / Math.Max(1, stopwatch.Elapsed.TotalSeconds):N0} samples/s)");
+                    Console.Write($"\r  {count} rows written ({count / Math.Max(1, stopwatch.Elapsed.TotalSeconds):N0} rows/s)");
                     lastReport = stopwatch.Elapsed;
                 }
             });
@@ -1032,11 +1016,11 @@ internal class Program
 
         var fileInfo = new FileInfo(outputPath);
         var seconds = stopwatch.Elapsed.TotalSeconds;
-        var samplesPerSec = seconds > 0 ? rowsWritten / seconds : 0;
+        var rowsPerSec = seconds > 0 ? rowsWritten / seconds : 0;
         var mbPerSec = seconds > 0 ? fileInfo.Length / seconds / (1024.0 * 1024.0) : 0;
 
-        Console.WriteLine($"Wrote {rowsWritten:N0} samples ({fileInfo.Length:N0} bytes) in {seconds:F2}s");
-        Console.WriteLine($"  Throughput: {samplesPerSec:N0} samples/s, {mbPerSec:F2} MB/s");
+        Console.WriteLine($"Wrote {rowsWritten:N0} rows ({fileInfo.Length:N0} bytes) in {seconds:F2}s");
+        Console.WriteLine($"  Throughput: {rowsPerSec:N0} rows/s, {mbPerSec:F2} MB/s");
         return 0;
     }
 
@@ -1518,11 +1502,6 @@ internal class Program
         public string? FirmwareHexPath { get; private set; }
         public string? FirmwareUpdateLatestDirectory { get; private set; }
         public bool LanChipInfo { get; private set; }
-        public bool MimicDesktop { get; private set; }
-        public int MimicDesktopChannels { get; private set; } = 16;
-        public int MimicDesktopFrequency { get; private set; } = 100;
-        public bool MimicDesktopSendDio { get; private set; }
-        public int MimicDesktopDelayMs { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -1641,21 +1620,6 @@ internal class Program
                     case "--lan-chip-info":
                         options.LanChipInfo = true;
                         break;
-                    case "--mimic-desktop":
-                        options.MimicDesktop = true;
-                        break;
-                    case "--mimic-desktop-channels":
-                        options.MimicDesktopChannels = GetIntValue(args, ref i, arg, options.Errors, 16);
-                        break;
-                    case "--mimic-desktop-freq":
-                        options.MimicDesktopFrequency = GetIntValue(args, ref i, arg, options.Errors, 100);
-                        break;
-                    case "--mimic-desktop-send-dio":
-                        options.MimicDesktopSendDio = true;
-                        break;
-                    case "--mimic-desktop-delay-ms":
-                        options.MimicDesktopDelayMs = GetIntValue(args, ref i, arg, options.Errors, 0);
-                        break;
                     case "-h":
                     case "--help":
                         options.ShowHelp = true;
@@ -1696,6 +1660,12 @@ internal class Program
                 string.IsNullOrWhiteSpace(options.FirmwareDownloadTagDirectory))
             {
                 options.Errors.Add("Missing destination directory for --fw-download-tag.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.SdExportCsvPath) &&
+                string.IsNullOrWhiteSpace(options.SdParsePath))
+            {
+                options.Errors.Add("--sd-export-csv requires --sd-parse <path>.");
             }
 
             return options;
