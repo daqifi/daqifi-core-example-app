@@ -9,6 +9,7 @@ using Daqifi.Core.Device.Discovery;
 using Daqifi.Core.Device.Protocol;
 using Daqifi.Core.Device.SdCard;
 using Daqifi.Core.Firmware;
+using Daqifi.Core.Logging.Export;
 using Google.Protobuf;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -923,6 +924,11 @@ internal class Program
                 if (cfg.DeviceSerialNumber != null) Console.WriteLine($"  Serial number:    {cfg.DeviceSerialNumber}");
             }
 
+            if (!string.IsNullOrWhiteSpace(options.SdExportCsvPath))
+            {
+                return await ExportSdSessionToCsvAsync(session, options.SdExportCsvPath!);
+            }
+
             var sampleCount = 0;
             using var outputWriter = CreateOutputWriter(options);
 
@@ -948,6 +954,91 @@ internal class Program
         {
             Console.Error.WriteLine($"Error parsing file: {FormatException(ex)}");
             return 1;
+        }
+    }
+
+    private static async Task<int> ExportSdSessionToCsvAsync(SdCardLogSession session, string outputPath)
+    {
+        // Determine analog port count: prefer the file's status message; fall back to peeking
+        // the first sample (which carries the actual emitted analog values).
+        IAsyncEnumerable<SdCardLogEntry> samplesForExport;
+        int analogCount;
+
+        if (session.DeviceConfig is not null)
+        {
+            analogCount = session.DeviceConfig.AnalogPortCount;
+            samplesForExport = session.Samples;
+        }
+        else
+        {
+            var enumerator = session.Samples.GetAsyncEnumerator();
+            if (!await enumerator.MoveNextAsync())
+            {
+                Console.Error.WriteLine("Cannot export to CSV: file is empty.");
+                await enumerator.DisposeAsync();
+                return 1;
+            }
+
+            var first = enumerator.Current;
+            analogCount = first.AnalogValues.Count;
+            samplesForExport = PrependAndStreamAsync(first, enumerator);
+        }
+
+        var sampleSource = new SdCardSampleSource(
+            new SdCardLogSession(session.FileName, session.FileCreatedDate, session.DeviceConfig, samplesForExport),
+            analogCount);
+        var exporter = new CsvExporter();
+        var exportOptions = new CsvExportOptions { UseRelativeTime = false };
+
+        Console.WriteLine($"Exporting CSV to: {outputPath}");
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        long rowsWritten = 0;
+        var lastReport = stopwatch.Elapsed;
+
+        await using (var fileStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+        await using (var writer = new StreamWriter(fileStream))
+        {
+            var countingSource = new CountingSampleSource(sampleSource, count =>
+            {
+                rowsWritten = count;
+                if (stopwatch.Elapsed - lastReport > TimeSpan.FromMilliseconds(250))
+                {
+                    Console.Write($"\r  {count} rows written ({count / Math.Max(1, stopwatch.Elapsed.TotalSeconds):N0} rows/s)");
+                    lastReport = stopwatch.Elapsed;
+                }
+            });
+
+            await exporter.ExportAsync(countingSource, writer, exportOptions);
+        }
+
+        stopwatch.Stop();
+        Console.WriteLine();
+
+        var fileInfo = new FileInfo(outputPath);
+        var seconds = stopwatch.Elapsed.TotalSeconds;
+        var rowsPerSec = seconds > 0 ? rowsWritten / seconds : 0;
+        var mbPerSec = seconds > 0 ? fileInfo.Length / seconds / (1024.0 * 1024.0) : 0;
+
+        Console.WriteLine($"Wrote {rowsWritten:N0} rows ({fileInfo.Length:N0} bytes) in {seconds:F2}s");
+        Console.WriteLine($"  Throughput: {rowsPerSec:N0} rows/s, {mbPerSec:F2} MB/s");
+        return 0;
+    }
+
+    private static async IAsyncEnumerable<SdCardLogEntry> PrependAndStreamAsync(
+        SdCardLogEntry first,
+        IAsyncEnumerator<SdCardLogEntry> rest)
+    {
+        try
+        {
+            yield return first;
+            while (await rest.MoveNextAsync())
+            {
+                yield return rest.Current;
+            }
+        }
+        finally
+        {
+            await rest.DisposeAsync();
         }
     }
 
@@ -1332,6 +1423,7 @@ internal class Program
         Console.WriteLine("  --sd-download <filename> Download a file from the SD card (USB/serial only).");
         Console.WriteLine("  --sd-format              Format the SD card (erases all data).");
         Console.WriteLine("  --sd-parse <path>        Parse a .bin log file from the SD card.");
+        Console.WriteLine("  --sd-export-csv <path>   With --sd-parse, write samples as CSV to <path> using Daqifi.Core's CsvExporter.");
         Console.WriteLine("  --sd-capture-parse <p>   Capture live stream to file, then parse it.");
         Console.WriteLine();
         Console.WriteLine("Firmware Download Options:");
@@ -1402,6 +1494,7 @@ internal class Program
         public string? SdDownloadFileName { get; private set; }
         public bool SdFormat { get; private set; }
         public string? SdParsePath { get; set; }
+        public string? SdExportCsvPath { get; private set; }
         public string? CaptureAndParsePath { get; private set; }
         public string? FirmwareDownloadLatestDirectory { get; private set; }
         public string? FirmwareDownloadTag { get; private set; }
@@ -1499,6 +1592,9 @@ internal class Program
                     case "--sd-parse":
                         options.SdParsePath = GetValue(args, ref i, arg, options.Errors);
                         break;
+                    case "--sd-export-csv":
+                        options.SdExportCsvPath = GetValue(args, ref i, arg, options.Errors);
+                        break;
                     case "--sd-capture-parse":
                         options.CaptureAndParsePath = GetValue(args, ref i, arg, options.Errors);
                         break;
@@ -1564,6 +1660,12 @@ internal class Program
                 string.IsNullOrWhiteSpace(options.FirmwareDownloadTagDirectory))
             {
                 options.Errors.Add("Missing destination directory for --fw-download-tag.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.SdExportCsvPath) &&
+                string.IsNullOrWhiteSpace(options.SdParsePath))
+            {
+                options.Errors.Add("--sd-export-csv requires --sd-parse <path>.");
             }
 
             return options;
