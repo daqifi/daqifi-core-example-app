@@ -845,6 +845,26 @@ internal class Program
 
             return 0;
         }
+        catch (SdCardNotPresentException)
+        {
+            Console.Error.WriteLine("No SD card is installed in the device.");
+            return 1;
+        }
+        catch (SdCardFilesystemException ex)
+        {
+            Console.Error.WriteLine($"SD card filesystem error: {ex.DeviceMessage}");
+            Console.Error.WriteLine("  Try a freshly FAT32-formatted card.");
+            return 1;
+        }
+        catch (SdCardOperationException ex)
+        {
+            Console.Error.WriteLine($"SD card error: {ex.Message}");
+            if (ex.LastScpiError is not null)
+            {
+                Console.Error.WriteLine($"  Device reported: {ex.LastScpiError}");
+            }
+            return 1;
+        }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error: {FormatException(ex)}");
