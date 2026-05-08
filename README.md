@@ -161,37 +161,9 @@ BuildDate: Mar 30 2022
 
 ## AI Agents: Validation Workflow
 
-This app is designed to validate `daqifi-core` changes against real hardware. AI agents can run this CLI as a hardware-in-the-loop check after modifying `daqifi-core`.
+This app is designed to validate `daqifi-core` changes against real hardware. AI agents and release authors should use the canonical hardware-in-the-loop workflow in [`skills/daqifi-hil-validation/SKILL.md`](skills/daqifi-hil-validation/SKILL.md). Codex can load it as a skill, and Claude Code can follow the same Markdown instructions directly.
 
-### Use local `daqifi-core` sources
-
-By default the app references the published NuGet package. To validate local changes, point the build to a local `Daqifi.Core.csproj` using the MSBuild property below.
-
-```bash
-dotnet run -p:DaqifiCoreProjectPath=/path/to/daqifi-core/src/Daqifi.Core/Daqifi.Core.csproj -- \
-  --ip 192.168.1.44 \
-  --port 9760 \
-  --rate 10 \
-  --channels 0000000011 \
-  --duration 10 \
-  --min-samples 5
-```
-
-### Recommended validation command
-
-```bash
-dotnet run -p:DaqifiCoreProjectPath=/path/to/daqifi-core/src/Daqifi.Core/Daqifi.Core.csproj -- \
-  --ip 192.168.1.44 \
-  --port 9760 \
-  --rate 10 \
-  --channels 0000000011 \
-  --duration 10 \
-  --min-samples 5 \
-  --format jsonl \
-  --output /tmp/daqifi-samples.jsonl
-```
-
-The command exits non-zero if it fails to connect/stream or if `--min-samples` is not met.
+The workflow builds this CLI against a local `Daqifi.Core.csproj` with `-p:DaqifiCoreProjectPath=...`, keeps the default smoke suite non-destructive, stores timestamped command artifacts, and treats the CLI exit codes plus explicit thresholds as the pass/fail authority.
 
 ## Troubleshooting
 

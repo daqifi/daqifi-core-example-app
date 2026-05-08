@@ -15,3 +15,7 @@ obj/
 # Output files
 *.csv
 *.jsonl
+artifacts/
+
+# Local hardware validation config
+.daqifi-hil.env
