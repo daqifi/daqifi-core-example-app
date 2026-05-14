@@ -69,18 +69,18 @@ internal class Program
             return await RunFirmwareDownloadByTagAsync(options);
         }
 
-        // Check if we have a connection target (IP or serial)
+        // Check if we have a connection target (IP, serial, or via-discovery)
         var hasIpTarget = !string.IsNullOrWhiteSpace(options.IpAddress);
         var hasSerialTarget = !string.IsNullOrWhiteSpace(options.SerialPort);
 
-        if (!hasIpTarget && !hasSerialTarget)
+        if (!hasIpTarget && !hasSerialTarget && !options.ViaDiscovery)
         {
             if (options.Discover || options.DiscoverSerial)
             {
                 return 0;
             }
 
-            Console.Error.WriteLine("Missing required option: --ip or --serial");
+            Console.Error.WriteLine("Missing required option: --ip, --serial, or --via-discovery");
             Console.Error.WriteLine("Use --help to see available options.");
             return 1;
         }
@@ -88,6 +88,12 @@ internal class Program
         if (hasIpTarget && hasSerialTarget)
         {
             Console.Error.WriteLine("Cannot specify both --ip and --serial. Use one or the other.");
+            return 1;
+        }
+
+        if (options.ViaDiscovery && hasSerialTarget)
+        {
+            Console.Error.WriteLine("--via-discovery is only valid for WiFi devices and cannot be combined with --serial.");
             return 1;
         }
 
@@ -156,6 +162,15 @@ internal class Program
                 options.BaudRate,
                 connectionOptions);
             connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+        }
+        else if (options.ViaDiscovery)
+        {
+            var (discoveredDevice, deviceInfo) = await ConnectViaDiscoveryAsync(options, connectionOptions);
+            device = discoveredDevice;
+            var ifaceStr = deviceInfo.LocalInterfaceAddress?.ToString() ?? "(none — OS-chosen)";
+            connectionDescription =
+                $"{deviceInfo.Name} at {deviceInfo.IPAddress}:{deviceInfo.Port} via discovery, " +
+                $"bound to local interface {ifaceStr}";
         }
         else
         {
@@ -322,6 +337,64 @@ internal class Program
                 Console.Error.WriteLine($"Disconnect error: {FormatException(ex)}");
             }
         }
+    }
+
+    private static async Task<(DaqifiDevice Device, IDeviceInfo DeviceInfo)> ConnectViaDiscoveryAsync(
+        CliOptions options,
+        DeviceConnectionOptions connectionOptions)
+    {
+        IPAddress? targetIp = null;
+        if (!string.IsNullOrWhiteSpace(options.IpAddress))
+        {
+            if (!IPAddress.TryParse(options.IpAddress, out targetIp))
+            {
+                throw new InvalidOperationException($"Invalid --ip value: {options.IpAddress}");
+            }
+        }
+
+        var filterDescription = targetIp != null ? $" matching {targetIp}" : string.Empty;
+        Console.WriteLine($"Discovering WiFi devices{filterDescription} (timeout {options.DiscoveryTimeoutSeconds}s)...");
+
+        using var finder = new WiFiDeviceFinder();
+        var timeout = TimeSpan.FromSeconds(options.DiscoveryTimeoutSeconds <= 0 ? 5 : options.DiscoveryTimeoutSeconds);
+        var discovered = (await finder.DiscoverAsync(timeout)).ToList();
+
+        IDeviceInfo? match;
+        if (targetIp != null)
+        {
+            match = discovered.FirstOrDefault(d => Equals(d.IPAddress, targetIp));
+            if (match == null)
+            {
+                var seen = string.Join(", ", discovered.Select(d => d.IPAddress?.ToString() ?? "?"));
+                throw new InvalidOperationException(
+                    $"Target device {targetIp} was not discovered. Discovered: [{seen}]");
+            }
+        }
+        else
+        {
+            if (discovered.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "No WiFi devices discovered. Pass --ip to filter to a specific device or increase --discover-timeout.");
+            }
+
+            if (discovered.Count > 1)
+            {
+                var summary = string.Join(", ", discovered.Select(d => $"{d.Name}@{d.IPAddress}"));
+                Console.WriteLine(
+                    $"Discovered {discovered.Count} devices ({summary}); connecting to the first. " +
+                    "Pass --ip to choose a specific device.");
+            }
+
+            match = discovered[0];
+        }
+
+        Console.WriteLine(
+            $"Discovered {match.Name} at {match.IPAddress}:{match.Port} " +
+            $"(LocalInterfaceAddress={match.LocalInterfaceAddress?.ToString() ?? "null"})");
+
+        var device = await DaqifiDeviceFactory.ConnectFromDeviceInfoAsync(match, connectionOptions);
+        return (device, match);
     }
 
     private static async Task<int> RunFirmwareUpdateAsync(
@@ -1390,12 +1463,19 @@ internal class Program
         Console.WriteLine("Usage:");
         Console.WriteLine("  dotnet run -- --ip <address> [options]");
         Console.WriteLine("  dotnet run -- --serial <port> [options]");
+        Console.WriteLine("  dotnet run -- --via-discovery [--ip <address>] [options]");
         Console.WriteLine();
         Console.WriteLine("Connection Options:");
         Console.WriteLine("  --ip <address>           Device IP address (for TCP/WiFi connection).");
         Console.WriteLine($"  --port <number>          TCP port (default: {DefaultPort}).");
         Console.WriteLine("  --serial <port>          Serial port name (e.g., COM3, /dev/ttyUSB0, /dev/cu.usbmodem101).");
         Console.WriteLine($"  --baud <rate>            Baud rate for serial connection (default: {DefaultBaudRate}).");
+        Console.WriteLine("  --via-discovery          Discover WiFi devices over UDP, then connect via");
+        Console.WriteLine("                           DaqifiDeviceFactory.ConnectFromDeviceInfoAsync. This");
+        Console.WriteLine("                           binds the outbound socket to the NIC that received the");
+        Console.WriteLine("                           discovery reply (required on multi-homed hosts). If --ip");
+        Console.WriteLine("                           is set, filter discovery to that address; otherwise");
+        Console.WriteLine("                           connect to the first discovered device.");
         Console.WriteLine();
         Console.WriteLine("Discovery Options:");
         Console.WriteLine("  -d, --discover           Discover WiFi devices over UDP.");
@@ -1502,6 +1582,7 @@ internal class Program
         public string? FirmwareHexPath { get; private set; }
         public string? FirmwareUpdateLatestDirectory { get; private set; }
         public bool LanChipInfo { get; private set; }
+        public bool ViaDiscovery { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -1619,6 +1700,9 @@ internal class Program
                         break;
                     case "--lan-chip-info":
                         options.LanChipInfo = true;
+                        break;
+                    case "--via-discovery":
+                        options.ViaDiscovery = true;
                         break;
                     case "-h":
                     case "--help":

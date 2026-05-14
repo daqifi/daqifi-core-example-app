@@ -27,11 +27,22 @@ dotnet run -- \
   --duration 10
 ```
 
+Discover and stream (canonical "find then connect" pattern; required on multi-homed hosts):
+
+```bash
+dotnet run -- \
+  --via-discovery \
+  --rate 10 \
+  --channels 0000000011 \
+  --duration 10
+```
+
 ## Options
 
 - `--discover` discover devices over UDP
 - `--ip <address>` device IP address
 - `--port <number>` TCP port (default 9760)
+- `--via-discovery` discover first, then connect via `DaqifiDeviceFactory.ConnectFromDeviceInfoAsync`. Required on multi-homed hosts so the outbound socket binds to the NIC that received the discovery reply. With `--ip`, filters to that address; without `--ip`, connects to the first discovered device.
 - `--rate <hz>` sampling rate in Hz (default 100)
 - `--duration <seconds>` streaming duration (default 10)
 - `--channels <mask>` ADC channel enable mask (0/1 string)
