@@ -43,6 +43,24 @@ internal class Program
             return 1;
         }
 
+        // Continuous "watch" mode owns its own exit code and is a dedicated dispatch
+        // path: handle it before one-shot discovery so the two never run together.
+        if (options.Watch && options.WatchSerial)
+        {
+            Console.Error.WriteLine("Cannot specify both --watch and --watch-serial. Use one or the other.");
+            return 1;
+        }
+
+        if (options.Watch)
+        {
+            return await RunWatchAsync(new WiFiDeviceFinder(), options);
+        }
+
+        if (options.WatchSerial)
+        {
+            return await RunWatchAsync(new SerialDeviceFinder(), options);
+        }
+
         if (options.Discover)
         {
             await DiscoverAsync(options.DiscoveryTimeoutSeconds);
@@ -636,6 +654,141 @@ internal class Program
                 Console.WriteLine($"  - {device.Name} ({device.PortName}) SN:{device.SerialNumber} FW:{device.FirmwareVersion}");
             }
         }
+    }
+
+    private static async Task<int> RunWatchAsync(IDeviceFinder finder, CliOptions options)
+    {
+        // A positive --duration auto-stops the watch; <= 0 means run until Ctrl+C,
+        // matching how streaming and SD logging treat DurationSeconds in this CLI.
+        var bounded = options.DurationSeconds > 0;
+
+        if (bounded)
+        {
+            Console.WriteLine($"Watching for devices for {options.DurationSeconds}s (Ctrl+C to stop early)...");
+        }
+        else
+        {
+            Console.WriteLine("Watching for devices (Ctrl+C to stop)...");
+        }
+
+        Console.WriteLine("Legend: [+] discovered, [-] lost");
+        Console.WriteLine();
+
+        // Surface operational errors (scan failures, a failed stop) via the exit code so
+        // scripts/CI don't read a clean exit as success, consistent with the other handlers.
+        var hadError = false;
+
+        // ContinuousDeviceFinder owns and disposes the inner finder (LeaveInnerFinderOpen = false),
+        // so a single using covers both.
+        using var watcher = new ContinuousDeviceFinder(finder, new ContinuousDiscoveryOptions
+        {
+            Interval = TimeSpan.FromSeconds(1),
+            PassTimeout = TimeSpan.FromSeconds(3),
+            MissThreshold = 2,
+        });
+
+        watcher.DeviceDiscovered += (_, args) =>
+        {
+            var d = args.DeviceInfo;
+            Console.WriteLine($"  [+] discovered {d.Name} SN:{d.SerialNumber} ({DescribeEndpoint(d)})");
+        };
+
+        watcher.DeviceLost += (_, args) =>
+        {
+            var d = args.DeviceInfo;
+            Console.WriteLine($"  [-] lost       {d.Name} SN:{d.SerialNumber} ({DescribeEndpoint(d)})");
+        };
+
+        watcher.ScanError += (_, args) =>
+        {
+            hadError = true;
+            Console.Error.WriteLine($"Scan error: {args.Exception.Message}");
+        };
+
+        using var stopCts = new CancellationTokenSource();
+        if (bounded)
+        {
+            stopCts.CancelAfter(TimeSpan.FromSeconds(options.DurationSeconds));
+        }
+
+        // Register Ctrl+C BEFORE starting the scan so an early Ctrl+C triggers graceful
+        // shutdown instead of killing the process. CancelKeyPress is a process-global event,
+        // so we remove the handler again in the outer finally (it would otherwise leak and
+        // could fire against a disposed token if watch mode runs more than once in-process).
+        ConsoleCancelEventHandler cancelHandler = (_, e) =>
+        {
+            e.Cancel = true;
+            // Ctrl+C fires on its own thread and can race shutdown disposing stopCts.
+            try { stopCts.Cancel(); }
+            catch (ObjectDisposedException) { /* already shutting down */ }
+        };
+        Console.CancelKeyPress += cancelHandler;
+
+        try
+        {
+            try
+            {
+                watcher.Start();
+            }
+            catch (Exception ex)
+            {
+                // Never started, so there is nothing to stop; the outer finally unsubscribes.
+                Console.Error.WriteLine($"Error: {FormatException(ex)}");
+                return 1;
+            }
+
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, stopCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected: duration elapsed or Ctrl+C pressed.
+            }
+            finally
+            {
+                // Always stop the scan loop, even if the wait above threw unexpectedly.
+                try
+                {
+                    await watcher.StopAsync();
+                }
+                catch (Exception ex)
+                {
+                    hadError = true;
+                    Console.Error.WriteLine($"Error stopping watcher: {FormatException(ex)}");
+                }
+            }
+        }
+        finally
+        {
+            Console.CancelKeyPress -= cancelHandler;
+        }
+
+        var live = watcher.Devices;
+        Console.WriteLine();
+        Console.WriteLine($"Final live set: {live.Count} device(s)");
+        foreach (var d in live)
+        {
+            Console.WriteLine($"  - {d.Name} SN:{d.SerialNumber} ({DescribeEndpoint(d)})");
+        }
+
+        return hadError ? 1 : 0;
+    }
+
+    // Renders whichever endpoint the transport populated (IP for WiFi, port for serial).
+    private static string DescribeEndpoint(IDeviceInfo device)
+    {
+        if (!string.IsNullOrWhiteSpace(device.PortName))
+        {
+            return device.PortName!;
+        }
+
+        if (device.IPAddress != null)
+        {
+            return $"{device.IPAddress}:{device.Port}";
+        }
+
+        return device.ConnectionType.ToString();
     }
 
     private static async Task<int> RunSdCardOperationAsync(CliOptions options)
@@ -1414,6 +1567,8 @@ internal class Program
         Console.WriteLine("  -d, --discover           Discover WiFi devices over UDP.");
         Console.WriteLine("  --discover-serial        List available serial ports.");
         Console.WriteLine("  --discover-timeout <s>   WiFi discovery timeout in seconds (default: 5).");
+        Console.WriteLine("  --watch                  Continuously watch for WiFi devices (live +/- updates), bounded by --duration.");
+        Console.WriteLine("  --watch-serial           Continuously watch for serial devices (live +/- updates), bounded by --duration.");
         Console.WriteLine();
         Console.WriteLine("Streaming Options:");
         Console.WriteLine($"  --rate <hz>              Streaming rate in Hz (default: {DefaultRate}).");
@@ -1482,6 +1637,8 @@ internal class Program
     {
         public bool Discover { get; private set; }
         public bool DiscoverSerial { get; private set; }
+        public bool Watch { get; private set; }
+        public bool WatchSerial { get; private set; }
         public string? IpAddress { get; private set; }
         public int Port { get; private set; } = DefaultPort;
         public string? SerialPort { get; private set; }
@@ -1534,6 +1691,12 @@ internal class Program
                         break;
                     case "--discover-serial":
                         options.DiscoverSerial = true;
+                        break;
+                    case "--watch":
+                        options.Watch = true;
+                        break;
+                    case "--watch-serial":
+                        options.WatchSerial = true;
                         break;
                     case "--ip":
                         options.IpAddress = GetValue(args, ref i, arg, options.Errors);
