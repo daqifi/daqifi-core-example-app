@@ -1428,8 +1428,8 @@ internal class Program
         Console.WriteLine("  --show-status            Print protobuf status messages when received.");
         Console.WriteLine();
         Console.WriteLine("SD Card Options:");
-        Console.WriteLine("  --sd-list                List files on the SD card.");
-        Console.WriteLine("  --sd-storage             Show SD card free/used/total space.");
+        Console.WriteLine("  --sd-list                List files on the SD card (USB/serial only).");
+        Console.WriteLine("  --sd-storage             Show SD card free/used/total space (USB/serial only).");
         Console.WriteLine("  --sd-log-start           Start SD card logging (use --duration to auto-stop).");
         Console.WriteLine("  --sd-log-format <fmt>    Log format: protobuf (default), json, csv.");
         Console.WriteLine("  --sd-log-stop            Stop SD card logging.");
@@ -1672,6 +1672,50 @@ internal class Program
             if (firmwareCommandCount > 1)
             {
                 options.Errors.Add("Specify only one firmware command at a time.");
+            }
+
+            // SD card device operations are dispatched via a single if/else-if chain in
+            // RunSdCardOperationAsync, so only one can actually run. Reject conflicting flags
+            // up front instead of silently ignoring all but the first.
+            var sdCommandCount = 0;
+            if (options.SdStorage)
+            {
+                sdCommandCount++;
+            }
+
+            if (options.SdList)
+            {
+                sdCommandCount++;
+            }
+
+            if (options.SdLogStart)
+            {
+                sdCommandCount++;
+            }
+
+            if (options.SdLogStop)
+            {
+                sdCommandCount++;
+            }
+
+            if (options.SdFormat)
+            {
+                sdCommandCount++;
+            }
+
+            if (options.SdDeleteFileName != null)
+            {
+                sdCommandCount++;
+            }
+
+            if (options.SdDownloadFileName != null)
+            {
+                sdCommandCount++;
+            }
+
+            if (sdCommandCount > 1)
+            {
+                options.Errors.Add("Specify only one SD card command at a time.");
             }
 
             if (!string.IsNullOrWhiteSpace(options.FirmwareDownloadTag) &&
