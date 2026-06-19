@@ -43,17 +43,8 @@ internal class Program
             return 1;
         }
 
-        if (options.Discover)
-        {
-            await DiscoverAsync(options.DiscoveryTimeoutSeconds);
-        }
-
-        if (options.DiscoverSerial)
-        {
-            await DiscoverSerialDevicesAsync(options.DiscoveryTimeoutSeconds);
-        }
-
-        // Continuous "watch" mode owns its own exit code, so return early.
+        // Continuous "watch" mode owns its own exit code and is a dedicated dispatch
+        // path: handle it before one-shot discovery so the two never run together.
         if (options.Watch && options.WatchSerial)
         {
             Console.Error.WriteLine("Cannot specify both --watch and --watch-serial. Use one or the other.");
@@ -68,6 +59,16 @@ internal class Program
         if (options.WatchSerial)
         {
             return await RunWatchAsync(new SerialDeviceFinder(), options);
+        }
+
+        if (options.Discover)
+        {
+            await DiscoverAsync(options.DiscoveryTimeoutSeconds);
+        }
+
+        if (options.DiscoverSerial)
+        {
+            await DiscoverSerialDevicesAsync(options.DiscoveryTimeoutSeconds);
         }
 
         // SD card file parse is a local-only operation (no device needed)
@@ -657,11 +658,25 @@ internal class Program
 
     private static async Task<int> RunWatchAsync(IDeviceFinder finder, CliOptions options)
     {
-        var durationSeconds = options.DurationSeconds > 0 ? options.DurationSeconds : DefaultDurationSeconds;
+        // A positive --duration auto-stops the watch; <= 0 means run until Ctrl+C,
+        // matching how streaming and SD logging treat DurationSeconds in this CLI.
+        var bounded = options.DurationSeconds > 0;
 
-        Console.WriteLine($"Watching for devices for {durationSeconds}s (Ctrl+C to stop early)...");
+        if (bounded)
+        {
+            Console.WriteLine($"Watching for devices for {options.DurationSeconds}s (Ctrl+C to stop early)...");
+        }
+        else
+        {
+            Console.WriteLine("Watching for devices (Ctrl+C to stop)...");
+        }
+
         Console.WriteLine("Legend: [+] discovered, [-] lost");
         Console.WriteLine();
+
+        // Surface operational errors (scan failures, a failed stop) via the exit code so
+        // scripts/CI don't read a clean exit as success, consistent with the other handlers.
+        var hadError = false;
 
         // ContinuousDeviceFinder owns and disposes the inner finder (LeaveInnerFinderOpen = false),
         // so a single using covers both.
@@ -686,25 +701,20 @@ internal class Program
 
         watcher.ScanError += (_, args) =>
         {
+            hadError = true;
             Console.Error.WriteLine($"Scan error: {args.Exception.Message}");
         };
 
-        try
-        {
-            watcher.Start();
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"Error: {FormatException(ex)}");
-            return 1;
-        }
-
         using var stopCts = new CancellationTokenSource();
-        stopCts.CancelAfter(TimeSpan.FromSeconds(durationSeconds));
+        if (bounded)
+        {
+            stopCts.CancelAfter(TimeSpan.FromSeconds(options.DurationSeconds));
+        }
 
-        // Hold a reference so the handler can be removed in the finally below. CancelKeyPress
-        // is a process-global event, so a handler left subscribed would leak (and could fire
-        // against a disposed token) if watch mode runs more than once in-process.
+        // Register Ctrl+C BEFORE starting the scan so an early Ctrl+C triggers graceful
+        // shutdown instead of killing the process. CancelKeyPress is a process-global event,
+        // so we remove the handler again in the outer finally (it would otherwise leak and
+        // could fire against a disposed token if watch mode runs more than once in-process).
         ConsoleCancelEventHandler cancelHandler = (_, e) =>
         {
             e.Cancel = true;
@@ -716,25 +726,42 @@ internal class Program
 
         try
         {
-            await Task.Delay(Timeout.InfiniteTimeSpan, stopCts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected: duration elapsed or Ctrl+C pressed.
+            try
+            {
+                watcher.Start();
+            }
+            catch (Exception ex)
+            {
+                // Never started, so there is nothing to stop; the outer finally unsubscribes.
+                Console.Error.WriteLine($"Error: {FormatException(ex)}");
+                return 1;
+            }
+
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, stopCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected: duration elapsed or Ctrl+C pressed.
+            }
+            finally
+            {
+                // Always stop the scan loop, even if the wait above threw unexpectedly.
+                try
+                {
+                    await watcher.StopAsync();
+                }
+                catch (Exception ex)
+                {
+                    hadError = true;
+                    Console.Error.WriteLine($"Error stopping watcher: {FormatException(ex)}");
+                }
+            }
         }
         finally
         {
             Console.CancelKeyPress -= cancelHandler;
-
-            // Always stop the scan loop, even if the wait above threw unexpectedly.
-            try
-            {
-                await watcher.StopAsync();
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Error stopping watcher: {FormatException(ex)}");
-            }
         }
 
         var live = watcher.Devices;
@@ -745,7 +772,7 @@ internal class Program
             Console.WriteLine($"  - {d.Name} SN:{d.SerialNumber} ({DescribeEndpoint(d)})");
         }
 
-        return 0;
+        return hadError ? 1 : 0;
     }
 
     // Renders whichever endpoint the transport populated (IP for WiFi, port for serial).
