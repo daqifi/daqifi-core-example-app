@@ -119,7 +119,8 @@ internal class Program
 
         // Route to SD card operations if any SD card flags are set
         if (options.SdList || options.SdLogStart || options.SdLogStop ||
-            options.SdDeleteFileName != null || options.SdDownloadFileName != null || options.SdFormat)
+            options.SdDeleteFileName != null || options.SdDownloadFileName != null ||
+            options.SdFormat || options.SdStorage)
         {
             return await RunSdCardOperationAsync(options);
         }
@@ -683,7 +684,19 @@ internal class Program
 
             await streamingDevice.InitializeAsync();
 
-            if (options.SdList)
+            if (options.SdStorage)
+            {
+                Console.WriteLine("Querying SD card storage...");
+                var storage = await streamingDevice.GetSdCardStorageAsync();
+                Console.WriteLine($"  Free:  {storage.FreeBytes,15:N0} bytes ({storage.FreeBytes / 1024.0 / 1024.0:F2} MiB)");
+                Console.WriteLine($"  Used:  {storage.UsedBytes,15:N0} bytes ({storage.UsedBytes / 1024.0 / 1024.0:F2} MiB)");
+                Console.WriteLine($"  Total: {storage.TotalBytes,15:N0} bytes ({storage.TotalBytes / 1024.0 / 1024.0:F2} MiB)");
+                if (storage.TotalBytes > 0)
+                {
+                    Console.WriteLine($"  Used%: {storage.UsedBytes * 100.0 / storage.TotalBytes:F1}%");
+                }
+            }
+            else if (options.SdList)
             {
                 Console.WriteLine("Listing SD card files...");
                 var files = await streamingDevice.GetSdCardFilesAsync();
@@ -1416,6 +1429,7 @@ internal class Program
         Console.WriteLine();
         Console.WriteLine("SD Card Options:");
         Console.WriteLine("  --sd-list                List files on the SD card.");
+        Console.WriteLine("  --sd-storage             Show SD card free/used/total space.");
         Console.WriteLine("  --sd-log-start           Start SD card logging (use --duration to auto-stop).");
         Console.WriteLine("  --sd-log-format <fmt>    Log format: protobuf (default), json, csv.");
         Console.WriteLine("  --sd-log-stop            Stop SD card logging.");
@@ -1493,6 +1507,7 @@ internal class Program
         public string? SdDeleteFileName { get; private set; }
         public string? SdDownloadFileName { get; private set; }
         public bool SdFormat { get; private set; }
+        public bool SdStorage { get; private set; }
         public string? SdParsePath { get; set; }
         public string? SdExportCsvPath { get; private set; }
         public string? CaptureAndParsePath { get; private set; }
@@ -1588,6 +1603,9 @@ internal class Program
                         break;
                     case "--sd-format":
                         options.SdFormat = true;
+                        break;
+                    case "--sd-storage":
+                        options.SdStorage = true;
                         break;
                     case "--sd-parse":
                         options.SdParsePath = GetValue(args, ref i, arg, options.Errors);
