@@ -53,6 +53,17 @@ internal class Program
             await DiscoverSerialDevicesAsync(options.DiscoveryTimeoutSeconds);
         }
 
+        // Continuous "watch" mode owns its own exit code, so return early.
+        if (options.Watch)
+        {
+            return await RunWatchAsync(new WiFiDeviceFinder(), options);
+        }
+
+        if (options.WatchSerial)
+        {
+            return await RunWatchAsync(new SerialDeviceFinder(), options);
+        }
+
         // SD card file parse is a local-only operation (no device needed)
         if (!string.IsNullOrWhiteSpace(options.SdParsePath))
         {
@@ -635,6 +646,92 @@ internal class Program
                 Console.WriteLine($"  - {device.Name} ({device.PortName}) SN:{device.SerialNumber} FW:{device.FirmwareVersion}");
             }
         }
+    }
+
+    private static async Task<int> RunWatchAsync(IDeviceFinder finder, CliOptions options)
+    {
+        var durationSeconds = options.DurationSeconds > 0 ? options.DurationSeconds : DefaultDurationSeconds;
+
+        Console.WriteLine($"Watching for devices for {durationSeconds}s (Ctrl+C to stop early)...");
+        Console.WriteLine("Legend: [+] discovered, [-] lost");
+        Console.WriteLine();
+
+        // ContinuousDeviceFinder owns and disposes the inner finder (LeaveInnerFinderOpen = false),
+        // so a single using covers both.
+        using var watcher = new ContinuousDeviceFinder(finder, new ContinuousDiscoveryOptions
+        {
+            Interval = TimeSpan.FromSeconds(1),
+            PassTimeout = TimeSpan.FromSeconds(3),
+            MissThreshold = 2,
+        });
+
+        watcher.DeviceDiscovered += (_, args) =>
+        {
+            var d = args.DeviceInfo;
+            Console.WriteLine($"  [+] discovered {d.Name} SN:{d.SerialNumber} ({DescribeEndpoint(d)})");
+        };
+
+        watcher.DeviceLost += (_, args) =>
+        {
+            var d = args.DeviceInfo;
+            Console.WriteLine($"  [-] lost       {d.Name} SN:{d.SerialNumber} ({DescribeEndpoint(d)})");
+        };
+
+        watcher.ScanError += (_, args) =>
+        {
+            Console.Error.WriteLine($"Scan error: {args.Exception.Message}");
+        };
+
+        try
+        {
+            watcher.Start();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {FormatException(ex)}");
+            return 1;
+        }
+
+        using var stopCts = new CancellationTokenSource();
+        stopCts.CancelAfter(TimeSpan.FromSeconds(durationSeconds));
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; stopCts.Cancel(); };
+
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, stopCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected: duration elapsed or Ctrl+C pressed.
+        }
+
+        await watcher.StopAsync();
+
+        var live = watcher.Devices;
+        Console.WriteLine();
+        Console.WriteLine($"Final live set: {live.Count} device(s)");
+        foreach (var d in live)
+        {
+            Console.WriteLine($"  - {d.Name} SN:{d.SerialNumber} ({DescribeEndpoint(d)})");
+        }
+
+        return 0;
+    }
+
+    // Renders whichever endpoint the transport populated (IP for WiFi, port for serial).
+    private static string DescribeEndpoint(IDeviceInfo device)
+    {
+        if (!string.IsNullOrWhiteSpace(device.PortName))
+        {
+            return device.PortName!;
+        }
+
+        if (device.IPAddress != null)
+        {
+            return $"{device.IPAddress}:{device.Port}";
+        }
+
+        return device.ConnectionType.ToString();
     }
 
     private static async Task<int> RunSdCardOperationAsync(CliOptions options)
@@ -1401,6 +1498,8 @@ internal class Program
         Console.WriteLine("  -d, --discover           Discover WiFi devices over UDP.");
         Console.WriteLine("  --discover-serial        List available serial ports.");
         Console.WriteLine("  --discover-timeout <s>   WiFi discovery timeout in seconds (default: 5).");
+        Console.WriteLine("  --watch                  Continuously watch for WiFi devices (live +/- updates), bounded by --duration.");
+        Console.WriteLine("  --watch-serial           Continuously watch for serial devices (live +/- updates), bounded by --duration.");
         Console.WriteLine();
         Console.WriteLine("Streaming Options:");
         Console.WriteLine($"  --rate <hz>              Streaming rate in Hz (default: {DefaultRate}).");
@@ -1468,6 +1567,8 @@ internal class Program
     {
         public bool Discover { get; private set; }
         public bool DiscoverSerial { get; private set; }
+        public bool Watch { get; private set; }
+        public bool WatchSerial { get; private set; }
         public string? IpAddress { get; private set; }
         public int Port { get; private set; } = DefaultPort;
         public string? SerialPort { get; private set; }
@@ -1519,6 +1620,12 @@ internal class Program
                         break;
                     case "--discover-serial":
                         options.DiscoverSerial = true;
+                        break;
+                    case "--watch":
+                        options.Watch = true;
+                        break;
+                    case "--watch-serial":
+                        options.WatchSerial = true;
                         break;
                     case "--ip":
                         options.IpAddress = GetValue(args, ref i, arg, options.Errors);

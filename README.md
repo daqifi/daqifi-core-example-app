@@ -30,6 +30,8 @@ dotnet run -- \
 ## Options
 
 - `--discover` discover devices over UDP
+- `--watch` continuously watch for WiFi devices (live `[+]`/`[-]` updates), bounded by `--duration`
+- `--watch-serial` continuously watch for serial devices (live `[+]`/`[-]` updates), bounded by `--duration`
 - `--ip <address>` device IP address
 - `--port <number>` TCP port (default 9760)
 - `--rate <hz>` sampling rate in Hz (default 100)
@@ -55,6 +57,27 @@ dotnet run -- \
 - `--fw-update-hex <path>` run PIC32 firmware update from a local Intel HEX file (USB/Serial only)
 - `--fw-update-latest <dir>` download latest PIC32 firmware HEX to `<dir>`, then run update (USB/Serial only)
 - `--lan-chip-info` query the WiFi module chip ID, firmware version, and build date (USB/Serial only)
+
+## Watch Mode (Continuous Discovery)
+
+Unlike one-shot `--discover`/`--discover-serial`, watch mode keeps a live, deduplicated
+device set and prints `[+] discovered` / `[-] lost` transitions as devices appear and
+disappear. The run is bounded by `--duration` and can be stopped early with Ctrl+C.
+
+Watch for serial devices for 30 seconds:
+
+```bash
+dotnet run -- --watch-serial --duration 30
+```
+
+Watch for WiFi devices:
+
+```bash
+dotnet run -- --watch --duration 30
+```
+
+Unplug/replug a device during the run to confirm the `[-] lost` line fires (after the
+miss threshold of consecutive missed passes). On exit, the final live set is printed.
 
 ## SD Card
 
