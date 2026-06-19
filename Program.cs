@@ -54,6 +54,12 @@ internal class Program
         }
 
         // Continuous "watch" mode owns its own exit code, so return early.
+        if (options.Watch && options.WatchSerial)
+        {
+            Console.Error.WriteLine("Cannot specify both --watch and --watch-serial. Use one or the other.");
+            return 1;
+        }
+
         if (options.Watch)
         {
             return await RunWatchAsync(new WiFiDeviceFinder(), options);
@@ -694,7 +700,18 @@ internal class Program
 
         using var stopCts = new CancellationTokenSource();
         stopCts.CancelAfter(TimeSpan.FromSeconds(durationSeconds));
-        Console.CancelKeyPress += (_, e) => { e.Cancel = true; stopCts.Cancel(); };
+
+        // Hold a reference so the handler can be removed in the finally below. CancelKeyPress
+        // is a process-global event, so a handler left subscribed would leak (and could fire
+        // against a disposed token) if watch mode runs more than once in-process.
+        ConsoleCancelEventHandler cancelHandler = (_, e) =>
+        {
+            e.Cancel = true;
+            // Ctrl+C fires on its own thread and can race shutdown disposing stopCts.
+            try { stopCts.Cancel(); }
+            catch (ObjectDisposedException) { /* already shutting down */ }
+        };
+        Console.CancelKeyPress += cancelHandler;
 
         try
         {
@@ -704,8 +721,20 @@ internal class Program
         {
             // Expected: duration elapsed or Ctrl+C pressed.
         }
+        finally
+        {
+            Console.CancelKeyPress -= cancelHandler;
 
-        await watcher.StopAsync();
+            // Always stop the scan loop, even if the wait above threw unexpectedly.
+            try
+            {
+                await watcher.StopAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error stopping watcher: {FormatException(ex)}");
+            }
+        }
 
         var live = watcher.Devices;
         Console.WriteLine();
