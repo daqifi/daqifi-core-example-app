@@ -47,6 +47,7 @@ dotnet run -- \
 - `--show-status` print protobuf status messages
 - `--discover-timeout <seconds>` discovery timeout (default 5)
 - `--sd-list` list files on the SD card (USB/Serial only)
+- `--sd-storage` show SD card free/used/total space (USB/Serial only)
 - `--sd-log-start` start SD card logging (USB/Serial only)
 - `--sd-log-stop` stop SD card logging (USB/Serial only)
 - `--sd-download <filename>` download a file from the SD card and parse it (USB/Serial only)
