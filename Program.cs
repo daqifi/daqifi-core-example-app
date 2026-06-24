@@ -5,6 +5,7 @@ using Daqifi.Core.Communication.Messages;
 using Daqifi.Core.Communication.Producers;
 using Daqifi.Core.Communication.Transport;
 using Daqifi.Core.Device;
+using Daqifi.Core.Device.Diagnostics;
 using Daqifi.Core.Device.Discovery;
 using Daqifi.Core.Device.Protocol;
 using Daqifi.Core.Device.SdCard;
@@ -146,6 +147,11 @@ internal class Program
         if (options.LanChipInfo)
         {
             return await RunLanChipInfoAsync(options);
+        }
+
+        if (options.Diagnostics)
+        {
+            return await RunDiagnosticsAsync(options);
         }
 
         return await RunStreamingSessionAsync(options);
@@ -1396,6 +1402,157 @@ internal class Program
         }
     }
 
+    private static async Task<int> RunDiagnosticsAsync(CliOptions options)
+    {
+        var connectionOptions = new DeviceConnectionOptions
+        {
+            ConnectionRetry = new ConnectionRetryOptions
+            {
+                Enabled = options.ConnectAttempts > 1,
+                MaxAttempts = Math.Max(1, options.ConnectAttempts),
+                ConnectionTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds)
+            }
+        };
+
+        DaqifiDevice device;
+        string connectionDescription;
+
+        if (!string.IsNullOrWhiteSpace(options.SerialPort))
+        {
+            device = await DaqifiDeviceFactory.ConnectSerialAsync(
+                options.SerialPort,
+                options.BaudRate,
+                connectionOptions);
+            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+        }
+        else
+        {
+            device = await DaqifiDeviceFactory.ConnectTcpAsync(
+                options.IpAddress!,
+                options.Port,
+                connectionOptions);
+            connectionDescription = $"{options.IpAddress}:{options.Port}";
+        }
+
+        using var _ = device;
+
+        try
+        {
+            Console.WriteLine($"Connected to {connectionDescription}");
+
+            if (device is not DaqifiStreamingDevice streamingDevice)
+            {
+                Console.Error.WriteLine("Diagnostics require a streaming device.");
+                return 1;
+            }
+
+            await streamingDevice.InitializeAsync();
+
+            // Each step is isolated: one unsupported/failed query is reported but
+            // does not abort the rest, so a single run surfaces the full picture.
+            var failures = 0;
+            async Task Step(string label, Func<Task> action)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"== {label} ==");
+                try
+                {
+                    await action();
+                }
+                catch (Exception ex)
+                {
+                    failures++;
+                    Console.Error.WriteLine($"  FAILED: {FormatException(ex)}");
+                }
+            }
+
+            await Step("Error queue depth (SYSTem:ERRor:COUNt?)", async () =>
+            {
+                var count = await streamingDevice.GetSystemErrorCountAsync();
+                Console.WriteLine($"  Queued SCPI errors: {count}");
+            });
+
+            await Step("Memory diagnostics (SYSTem:MEMory:FREE?)", async () =>
+            {
+                var mem = await streamingDevice.GetMemoryDiagnosticsAsync();
+                Console.WriteLine($"  HeapFree={mem.HeapFree} / HeapTotal={mem.HeapTotal} " +
+                                  $"(HeapUsed={mem.HeapUsed}, MinEverFree={mem.HeapMinEverFree})");
+                Console.WriteLine($"  SamplePool: count={mem.SamplePoolCount} inUse={mem.SamplePoolInUse} maxUsed={mem.SamplePoolMaxUsed}");
+                Console.WriteLine($"  ({mem.Values.Count} fields total)");
+            });
+
+            await Step("Stream stats (SYSTem:STReam:STATS?)", async () =>
+            {
+                var stats = await streamingDevice.GetStreamStatsAsync();
+                Console.WriteLine($"  TotalSamplesStreamed={stats.TotalSamplesStreamed} TotalBytesStreamed={stats.TotalBytesStreamed}");
+                Console.WriteLine($"  QueueDroppedSamples={stats.QueueDroppedSamples} TimerISRCalls={stats.TimerISRCalls}");
+                Console.WriteLine($"  ({stats.Values.Count} counters total)");
+            });
+
+            await Step("Inject test log messages (SYSTem:LOG:TEST)", async () =>
+            {
+                await streamingDevice.TestSystemLogAsync();
+                Console.WriteLine("  Test messages injected.");
+            });
+
+            await Step("Read system log (SYSTem:LOG?)", async () =>
+            {
+                var log = await streamingDevice.GetSystemLogAsync();
+                Console.WriteLine($"  {log.Count} entries:");
+                foreach (var entry in log.Take(20))
+                {
+                    Console.WriteLine($"    {entry.Message}");
+                }
+                if (log.Count > 20)
+                {
+                    Console.WriteLine($"    ... ({log.Count - 20} more)");
+                }
+            });
+
+            await Step("Command history (SYSTem:LOG:CMDHistory?)", async () =>
+            {
+                var history = await streamingDevice.GetCommandHistoryAsync();
+                Console.WriteLine($"  {history.Count} commands:");
+                foreach (var command in history.Take(20))
+                {
+                    Console.WriteLine($"    {command}");
+                }
+            });
+
+            await Step("Set log level (SYSTem:LOG:LEVel STREAM,2)", async () =>
+            {
+                var applied = await streamingDevice.SetLogLevelAsync("STREAM", 2);
+                Console.WriteLine($"  {applied.Module}: level={applied.Level} (ceiling {applied.Ceiling})");
+            });
+
+            await Step("Clear system log (SYSTem:LOG:CLEar)", async () =>
+            {
+                await streamingDevice.ClearSystemLogAsync();
+                Console.WriteLine("  Log cleared.");
+            });
+
+            Console.WriteLine();
+            if (failures == 0)
+            {
+                Console.WriteLine("All diagnostics queries succeeded.");
+                return 0;
+            }
+
+            Console.Error.WriteLine($"{failures} diagnostics step(s) failed.");
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {FormatException(ex)}");
+            return 1;
+        }
+        finally
+        {
+            try { device.Disconnect(); }
+            catch (Exception ex) { Console.Error.WriteLine($"Disconnect error: {FormatException(ex)}"); }
+        }
+    }
+
     private static bool IsStreamLikeMessage(DaqifiOutMessage message)
     {
         return message.AnalogInData.Count > 0 ||
@@ -1605,6 +1762,8 @@ internal class Program
         Console.WriteLine();
         Console.WriteLine("Device Info Options:");
         Console.WriteLine("  --lan-chip-info          Query the WiFi module chip ID, firmware version, and build date.");
+        Console.WriteLine("  --diagnostics            Run all IDeviceDiagnostics queries (log, levels, command");
+        Console.WriteLine("                           history, error-queue depth, stream/memory counters).");
         Console.WriteLine();
         Console.WriteLine("Advanced Options:");
         Console.WriteLine($"  --connect-timeout <s>    Connect timeout in seconds (default: {DefaultConnectTimeoutSeconds}).");
@@ -1674,6 +1833,7 @@ internal class Program
         public string? FirmwareHexPath { get; private set; }
         public string? FirmwareUpdateLatestDirectory { get; private set; }
         public bool LanChipInfo { get; private set; }
+        public bool Diagnostics { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -1800,6 +1960,9 @@ internal class Program
                         break;
                     case "--lan-chip-info":
                         options.LanChipInfo = true;
+                        break;
+                    case "--diagnostics":
+                        options.Diagnostics = true;
                         break;
                     case "-h":
                     case "--help":
