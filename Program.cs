@@ -4,6 +4,7 @@ using System.Text;
 using Daqifi.Core.Communication.Messages;
 using Daqifi.Core.Communication.Producers;
 using Daqifi.Core.Communication.Transport;
+using Daqifi.Core.Channel;
 using Daqifi.Core.Device;
 using Daqifi.Core.Device.Discovery;
 using Daqifi.Core.Device.Protocol;
@@ -146,6 +147,11 @@ internal class Program
         if (options.LanChipInfo)
         {
             return await RunLanChipInfoAsync(options);
+        }
+
+        if (options.Decoded)
+        {
+            return await RunDecodedStreamingSessionAsync(options);
         }
 
         return await RunStreamingSessionAsync(options);
@@ -317,6 +323,223 @@ internal class Program
             {
                 Console.Error.WriteLine(
                     $"Validation failed: received {messageCount} sample(s), expected at least {options.MinSamples}.");
+                return 2;
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {FormatException(ex)}");
+            return 1;
+        }
+        finally
+        {
+            try
+            {
+                if (!options.KeepConnected)
+                {
+                    device.Disconnect();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Disconnect error: {FormatException(ex)}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Streams using Core's decoded per-frame sample pipeline (issue #242): rather than
+    /// hand-demuxing raw protobuf frames (see <see cref="RunStreamingSessionAsync"/>), this
+    /// subscribes to each enabled channel's <see cref="IChannel.SampleReceived"/> event and reports
+    /// the scaled value, raw ADC count, and device timestamp Core decodes per channel.
+    /// </summary>
+    private static async Task<int> RunDecodedStreamingSessionAsync(CliOptions options)
+    {
+        var connectionOptions = new DeviceConnectionOptions
+        {
+            ConnectionRetry = new ConnectionRetryOptions
+            {
+                Enabled = options.ConnectAttempts > 1,
+                MaxAttempts = Math.Max(1, options.ConnectAttempts),
+                ConnectionTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds)
+            }
+        };
+
+        DaqifiDevice device;
+        string connectionDescription;
+
+        if (!string.IsNullOrWhiteSpace(options.SerialPort))
+        {
+            device = await DaqifiDeviceFactory.ConnectSerialAsync(
+                options.SerialPort,
+                options.BaudRate,
+                connectionOptions);
+            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+        }
+        else
+        {
+            device = await DaqifiDeviceFactory.ConnectTcpAsync(
+                options.IpAddress!,
+                options.Port,
+                connectionOptions);
+            connectionDescription = $"{options.IpAddress}:{options.Port}";
+        }
+
+        using var _ = device;
+
+        device.StatusChanged += (_, eventArgs) => Console.WriteLine($"Status: {eventArgs.Status}");
+
+        try
+        {
+            Console.WriteLine($"Connected to {connectionDescription}");
+
+            if (device is not DaqifiStreamingDevice streamingDevice)
+            {
+                Console.Error.WriteLine("Decoded streaming requires a streaming device.");
+                return 1;
+            }
+
+            // Populate the channel collection so we can enable channels and subscribe to them.
+            await streamingDevice.InitializeAsync();
+
+            // Select analog channels from the bitmask (default channels 0 and 1). Enabling through
+            // Core's channel API (rather than a raw EnableAdcChannels SCPI mask) sets IChannel.IsEnabled,
+            // which the decode pipeline keys off when demultiplexing the stream.
+            var mask = 0b11u;
+            if (!string.IsNullOrWhiteSpace(options.ChannelMask) &&
+                uint.TryParse(options.ChannelMask, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedMask))
+            {
+                mask = parsedMask;
+            }
+
+            var selected = streamingDevice.Channels
+                .OfType<IAnalogChannel>()
+                .Where(c => (mask & (1u << c.ChannelNumber)) != 0)
+                .OrderBy(c => c.ChannelNumber)
+                .Cast<IChannel>()
+                .ToList();
+
+            if (selected.Count == 0)
+            {
+                selected = streamingDevice.Channels.OfType<IAnalogChannel>()
+                    .OrderBy(c => c.ChannelNumber)
+                    .Take(2)
+                    .Cast<IChannel>()
+                    .ToList();
+            }
+
+            if (selected.Count == 0)
+            {
+                Console.Error.WriteLine("Device reported no analog channels to stream.");
+                return 1;
+            }
+
+            streamingDevice.EnableChannels(selected);
+            Console.WriteLine($"Enabled channels: {string.Join(", ", selected.Select(c => c.Name))}");
+
+            // Per-channel aggregation, plus a preview of the first samples decoded.
+            var counts = selected.ToDictionary(c => c.ChannelNumber, _ => 0);
+            var lastSamples = new Dictionary<int, IDataSample>();
+            var aggregateLock = new object();
+            var totalSamples = 0;
+            var previewRemaining = 12;
+
+            void OnSample(object? sender, SampleReceivedEventArgs e)
+            {
+                lock (aggregateLock)
+                {
+                    var channel = e.Channel ?? sender as IChannel;
+                    if (channel == null)
+                    {
+                        return;
+                    }
+
+                    counts[channel.ChannelNumber] = counts.GetValueOrDefault(channel.ChannelNumber) + 1;
+                    lastSamples[channel.ChannelNumber] = e.Sample;
+                    totalSamples++;
+
+                    if (previewRemaining > 0)
+                    {
+                        previewRemaining--;
+                        var raw = e.Sample.RawValue.HasValue
+                            ? e.Sample.RawValue.Value.ToString(CultureInfo.InvariantCulture)
+                            : "n/a";
+                        var devTs = e.Sample.DeviceTimestamp.HasValue
+                            ? e.Sample.DeviceTimestamp.Value.ToString(CultureInfo.InvariantCulture)
+                            : "n/a";
+                        Console.WriteLine(
+                            $"  [{channel.Name}] scaled={e.Sample.Value,12:F6}  raw={raw,-8}  deviceTs={devTs,-12}  host={e.Sample.Timestamp:HH:mm:ss.fff}");
+                    }
+                }
+            }
+
+            foreach (var channel in selected)
+            {
+                channel.SampleReceived += OnSample;
+            }
+
+            using var stopCts = new CancellationTokenSource();
+            if (options.DurationSeconds > 0)
+            {
+                stopCts.CancelAfter(TimeSpan.FromSeconds(options.DurationSeconds));
+            }
+
+            Console.CancelKeyPress += (_, eventArgs) =>
+            {
+                eventArgs.Cancel = true;
+                stopCts.Cancel();
+            };
+
+            streamingDevice.StreamingFrequency = options.SampleRate;
+            streamingDevice.StartStreaming();
+            Console.WriteLine($"Streaming (decoded) at {options.SampleRate} Hz for {options.DurationSeconds}s...");
+
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, stopCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected when the duration elapses or the user cancels.
+            }
+
+            streamingDevice.StopStreaming();
+
+            foreach (var channel in selected)
+            {
+                channel.SampleReceived -= OnSample;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("Per-channel summary:");
+            lock (aggregateLock)
+            {
+                foreach (var channel in selected)
+                {
+                    var count = counts.GetValueOrDefault(channel.ChannelNumber);
+                    if (lastSamples.TryGetValue(channel.ChannelNumber, out var last))
+                    {
+                        var raw = last.RawValue.HasValue
+                            ? last.RawValue.Value.ToString(CultureInfo.InvariantCulture)
+                            : "n/a";
+                        Console.WriteLine(
+                            $"  {channel.Name}: {count} sample(s), last scaled={last.Value:F6}, last raw={raw}, last deviceTs={last.DeviceTimestamp?.ToString(CultureInfo.InvariantCulture) ?? "n/a"}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  {channel.Name}: 0 samples");
+                    }
+                }
+            }
+
+            Console.WriteLine($"Total decoded samples: {totalSamples}");
+
+            if (options.MinSamples > 0 && totalSamples < options.MinSamples)
+            {
+                Console.Error.WriteLine(
+                    $"Validation failed: received {totalSamples} decoded sample(s), expected at least {options.MinSamples}.");
                 return 2;
             }
 
@@ -1574,6 +1797,8 @@ internal class Program
         Console.WriteLine($"  --rate <hz>              Streaming rate in Hz (default: {DefaultRate}).");
         Console.WriteLine($"  --duration <seconds>     Duration to stream (default: {DefaultDurationSeconds}).");
         Console.WriteLine("  --channels <mask>        Enable ADC channels with a decimal bitmask (e.g. 7 = ch 0,1,2).");
+        Console.WriteLine("  --decoded                Stream via Core's decoded per-channel SampleReceived pipeline");
+        Console.WriteLine("                           (reports scaled value, raw ADC count, and device timestamp).");
         Console.WriteLine("  --limit <count>          Stop after N stream messages.");
         Console.WriteLine("  --min-samples <count>    Require at least N stream messages (exit code 2 on failure).");
         Console.WriteLine();
@@ -1674,6 +1899,7 @@ internal class Program
         public string? FirmwareHexPath { get; private set; }
         public string? FirmwareUpdateLatestDirectory { get; private set; }
         public bool LanChipInfo { get; private set; }
+        public bool Decoded { get; private set; }
         public List<string> Errors { get; } = new();
 
         public static CliOptions Parse(string[] args)
@@ -1800,6 +2026,9 @@ internal class Program
                         break;
                     case "--lan-chip-info":
                         options.LanChipInfo = true;
+                        break;
+                    case "--decoded":
+                        options.Decoded = true;
                         break;
                     case "-h":
                     case "--help":
