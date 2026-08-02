@@ -1174,8 +1174,14 @@ internal class Program
     /// <summary>
     /// Whether <paramref name="fileName"/> names a log format the parser understands.
     /// </summary>
+    /// <remarks>
+    /// The extensions are listed here rather than read from Core (<c>TryDetectFormat</c> /
+    /// <c>SupportedExtensions</c>) because this project also builds against the pinned
+    /// <c>Daqifi.Core</c> package release, which predates both — the same reason
+    /// <see cref="GetLogFormatLabel(string)"/> lists them too.
+    /// </remarks>
     private static bool IsParseableLogFile(string fileName)
-        => SdCardFileParserFactory.TryDetectFormat(fileName, out _);
+        => Path.GetExtension(fileName).ToLowerInvariant() is ".bin" or ".csv" or ".json";
 
     private static bool EndsWithDirectorySeparator(string path)
     {
