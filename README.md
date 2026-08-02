@@ -51,7 +51,8 @@ dotnet run -- \
 - `--sd-log-start` start SD card logging (USB/Serial only)
 - `--sd-log-stop` stop SD card logging (USB/Serial only)
 - `--sd-download <filename>` download a file from the SD card and parse it, saved as `./<filename>`
-- `--sd-download-to <path>` destination for `--sd-download`: a file path, or a directory to save under the source file name (never overwrites an existing file)
+- `--sd-download-to <path>` destination for `--sd-download`: a file path, or a directory to save under the source file name
+- `--overwrite` allow `--sd-download` to replace an existing destination file (refused by default)
 - `--sd-delete <filename>` delete a file from the SD card (USB/Serial only)
 - `--sd-format` format the SD card (USB/Serial only)
 - `--fw-download-latest <dir>` download latest PIC32 firmware HEX into `<dir>`

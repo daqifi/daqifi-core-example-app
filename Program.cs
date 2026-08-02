@@ -837,6 +837,7 @@ internal class Program
             sdDownloadDestination = ResolveSdDownloadDestination(
                 options.SdDownloadFileName,
                 options.SdDownloadDestination,
+                options.Overwrite,
                 out var destinationError);
 
             if (sdDownloadDestination is null)
@@ -1014,10 +1015,11 @@ internal class Program
                 try
                 {
                     // CreateNew rather than Create: the destination was checked above, and this
-                    // closes the race so a concurrent writer's file is never truncated.
+                    // closes the race so a concurrent writer's file is never truncated. With
+                    // --overwrite the user has explicitly accepted replacing whatever is there.
                     await using var destinationStream = new FileStream(
                         destinationPath,
-                        FileMode.CreateNew,
+                        options.Overwrite ? FileMode.Create : FileMode.CreateNew,
                         FileAccess.Write,
                         FileShare.None,
                         bufferSize: 65536,
@@ -1043,9 +1045,11 @@ internal class Program
                 Console.WriteLine($"Download complete: {result.FileSize:N0} bytes in {result.Duration.TotalSeconds:F1}s");
                 Console.WriteLine($"Saved to: {destinationPath}");
 
-                // Parse the downloaded file (any supported format)
-                var downloadExt = Path.GetExtension(destinationPath).ToLowerInvariant();
-                if (downloadExt is ".bin" or ".csv" or ".json")
+                // Parse the downloaded file (any supported format). The format is a property of the
+                // file's name on the device, not of wherever the user chose to save it — otherwise
+                // a --sd-download-to path with no extension (or a different one) would silently
+                // skip the parse that --sd-download documents.
+                if (IsParseableLogFile(options.SdDownloadFileName))
                 {
                     Console.WriteLine();
                     Console.WriteLine("--- Parsing downloaded file ---");
@@ -1054,7 +1058,7 @@ internal class Program
                     // Pass the connected device's config so the parser can
                     // scale raw ADC values using the device's calibration.
                     var deviceConfig = SdCardDeviceConfiguration.FromDevice((DaqifiDevice)device);
-                    return await RunSdCardParseAsync(options, deviceConfig);
+                    return await RunSdCardParseAsync(options, deviceConfig, options.SdDownloadFileName);
                 }
             }
             else if (options.SdFormat)
@@ -1098,11 +1102,13 @@ internal class Program
     /// </summary>
     /// <param name="sourceFileName">The file name on the device's SD card.</param>
     /// <param name="requestedDestination">The <c>--sd-download-to</c> value, if any.</param>
+    /// <param name="allowOverwrite">Whether <c>--overwrite</c> was given.</param>
     /// <param name="error">Set to the message to print when the destination is unusable.</param>
     /// <returns>The absolute destination path, or <c>null</c> when it is unusable.</returns>
     private static string? ResolveSdDownloadDestination(
         string sourceFileName,
         string? requestedDestination,
+        bool allowOverwrite,
         out string? error)
     {
         error = null;
@@ -1148,10 +1154,10 @@ internal class Program
             return null;
         }
 
-        if (File.Exists(destinationPath))
+        if (!allowOverwrite && File.Exists(destinationPath))
         {
             error = $"Destination already exists: {destinationPath}. " +
-                    "Use --sd-download-to <path> to write somewhere else, or remove the existing file.";
+                    "Pass --overwrite to replace it, or use --sd-download-to <path> to write somewhere else.";
             return null;
         }
 
@@ -1165,14 +1171,28 @@ internal class Program
         return destinationPath;
     }
 
+    /// <summary>
+    /// Whether <paramref name="fileName"/> names a log format the parser understands.
+    /// </summary>
+    private static bool IsParseableLogFile(string fileName)
+        => SdCardFileParserFactory.TryDetectFormat(fileName, out _);
+
     private static bool EndsWithDirectorySeparator(string path)
     {
         return path.EndsWith(Path.DirectorySeparatorChar) || path.EndsWith(Path.AltDirectorySeparatorChar);
     }
 
+    /// <param name="options">Parsed CLI options; <c>SdParsePath</c> selects the file to read.</param>
+    /// <param name="deviceConfig">Optional live device configuration used to scale raw ADC values.</param>
+    /// <param name="sourceFileName">
+    /// The name the file had on the device, when it was just downloaded. The format and the logging
+    /// date are read from this name rather than from the local path, so saving under a different
+    /// name (or none) via <c>--sd-download-to</c> does not change how the file is parsed.
+    /// </param>
     private static async Task<int> RunSdCardParseAsync(
         CliOptions options,
-        SdCardDeviceConfiguration? deviceConfig = null)
+        SdCardDeviceConfiguration? deviceConfig = null,
+        string? sourceFileName = null)
     {
         var filePath = options.SdParsePath!;
         if (!File.Exists(filePath))
@@ -1181,10 +1201,13 @@ internal class Program
             return 1;
         }
 
+        // When the file was downloaded, its identity for parsing purposes is the device-side name.
+        var formatSourceName = sourceFileName ?? filePath;
+
         SdCardLogFormat format;
         try
         {
-            format = SdCardFileParserFactory.DetectFormat(filePath);
+            format = SdCardFileParserFactory.DetectFormat(formatSourceName);
         }
         catch (ArgumentException ex)
         {
@@ -1192,7 +1215,7 @@ internal class Program
             return 1;
         }
 
-        var formatLabel = GetLogFormatLabel(filePath);
+        var formatLabel = GetLogFormatLabel(format);
         Console.WriteLine($"Parsing {formatLabel} SD card log file: {filePath}");
 
         var parseOptions = new SdCardParseOptions
@@ -1210,7 +1233,23 @@ internal class Program
 
         try
         {
-            var session = await SdCardFileParserFactory.ParseFileAsync(filePath, parseOptions);
+            // Parsed with an explicit format rather than via ParseFileAsync, which would re-derive
+            // the format from the local path. Identical for a plain --sd-parse (the name passed for
+            // metadata is the same one ParseFileAsync would use); for a download it keeps the
+            // device-side name, so the format and the logging date survive --sd-download-to.
+            await using var parseStream = new FileStream(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: parseOptions.BufferSize,
+                useAsync: true);
+
+            var session = await SdCardFileParserFactory.ParseWithFormatAsync(
+                parseStream,
+                Path.GetFileName(formatSourceName),
+                format,
+                parseOptions);
             Console.WriteLine();
 
             Console.WriteLine($"File: {session.FileName}");
@@ -1671,6 +1710,17 @@ internal class Program
         };
     }
 
+    private static string GetLogFormatLabel(SdCardLogFormat format)
+    {
+        return format switch
+        {
+            SdCardLogFormat.Protobuf => "Protobuf",
+            SdCardLogFormat.Json => "JSON",
+            SdCardLogFormat.Csv => "CSV",
+            _ => "Unknown"
+        };
+    }
+
     private static bool IsValidChannelMask(string channelMask)
     {
         return uint.TryParse(channelMask, out _);
@@ -1718,7 +1768,8 @@ internal class Program
         Console.WriteLine("  --sd-delete <filename>   Delete a file from the SD card.");
         Console.WriteLine("  --sd-download <filename> Download a file from the SD card, saved as ./<filename>.");
         Console.WriteLine("  --sd-download-to <path>  Destination for --sd-download: a file path, or a directory to");
-        Console.WriteLine("                           save under the source file name. Never overwrites.");
+        Console.WriteLine("                           save under the source file name.");
+        Console.WriteLine("  --overwrite              Allow --sd-download to replace an existing destination file.");
         Console.WriteLine("  --sd-format              Format the SD card (erases all data).");
         Console.WriteLine("  --sd-parse <path>        Parse a .bin log file from the SD card.");
         Console.WriteLine("  --sd-export-csv <path>   With --sd-parse, write samples as CSV to <path> using Daqifi.Core's CsvExporter.");
@@ -1793,6 +1844,7 @@ internal class Program
         public string? SdDeleteFileName { get; private set; }
         public string? SdDownloadFileName { get; private set; }
         public string? SdDownloadDestination { get; private set; }
+        public bool Overwrite { get; private set; }
         public bool SdFormat { get; private set; }
         public bool SdStorage { get; private set; }
         public string? SdParsePath { get; set; }
@@ -1896,6 +1948,9 @@ internal class Program
                         break;
                     case "--sd-download-to":
                         options.SdDownloadDestination = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--overwrite":
+                        options.Overwrite = true;
                         break;
                     case "--sd-format":
                         options.SdFormat = true;
@@ -2030,6 +2085,11 @@ internal class Program
                 string.IsNullOrWhiteSpace(options.SdDownloadFileName))
             {
                 options.Errors.Add("--sd-download-to requires --sd-download <filename>.");
+            }
+
+            if (options.Overwrite && string.IsNullOrWhiteSpace(options.SdDownloadFileName))
+            {
+                options.Errors.Add("--overwrite requires --sd-download <filename>.");
             }
 
             return options;
