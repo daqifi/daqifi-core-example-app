@@ -73,18 +73,25 @@ internal sealed class SdCardSampleSource : ISampleSource
 }
 
 /// <summary>
-/// Wraps any <see cref="ISampleSource"/> and invokes a callback after each sample, used by the
-/// CLI to drive a throughput-aware progress display without changing the underlying source.
+/// Wraps any <see cref="ISampleSource"/> and reports a running count of the CSV rows
+/// <see cref="CsvExporter"/> will write, used by the CLI to drive a throughput-aware progress
+/// display without changing the underlying source.
 /// </summary>
-internal sealed class CountingSampleSource : ISampleSource
+/// <remarks>
+/// The exporter collapses every consecutive <see cref="SampleRow"/> that shares a timestamp into a
+/// single CSV line, so a row is a timestamp, not a sample. Counting the samples themselves — one
+/// per channel per log entry — over-reports by the channel count, which is what made a 95-sample
+/// two-channel export claim 190 rows for a 96-line file.
+/// </remarks>
+internal sealed class RowCountingSampleSource : ISampleSource
 {
     private readonly ISampleSource _inner;
-    private readonly Action<long> _onSample;
+    private readonly Action<long> _onRow;
 
-    public CountingSampleSource(ISampleSource inner, Action<long> onSample)
+    public RowCountingSampleSource(ISampleSource inner, Action<long> onRow)
     {
         _inner = inner;
-        _onSample = onSample;
+        _onRow = onRow;
     }
 
     public IReadOnlyList<ChannelDescriptor> GetChannels() => _inner.GetChannels();
@@ -95,11 +102,21 @@ internal sealed class CountingSampleSource : ISampleSource
     public async IAsyncEnumerable<SampleRow> StreamSamples(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        long count = 0;
+        long rows = 0;
+        long? currentTicks = null;
+
         await foreach (var sample in _inner.StreamSamples(cancellationToken))
         {
-            count++;
-            _onSample(count);
+            // Mirrors the exporter's own grouping rule (flush when the timestamp changes), so the
+            // count matches the file line for line — including when consecutive entries repeat a
+            // timestamp and the exporter merges them into one row.
+            if (currentTicks != sample.TimestampTicks)
+            {
+                currentTicks = sample.TimestampTicks;
+                rows++;
+                _onRow(rows);
+            }
+
             yield return sample;
         }
     }
