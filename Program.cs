@@ -1009,35 +1009,45 @@ internal class Program
                 var destinationPath = sdDownloadDestination!;
                 SdCardDownloadResult result;
 
-                // Tracks whether this process actually created the file, so the cleanup below can
-                // never delete a file someone else created between the check above and the open.
-                var createdDestination = false;
+                // Download into a sibling temporary file and publish it only once the transfer has
+                // completed. Writing straight to the destination would mean a stalled or failed
+                // download destroys whatever was already there (with --overwrite, the moment the
+                // file is opened) or leaves a partial one that looks like a good download. A
+                // sibling rather than the system temp directory keeps the publish step a
+                // same-volume rename instead of a cross-device copy.
+                var tempPath = $"{destinationPath}.part-{Guid.NewGuid():N}";
                 try
                 {
-                    // CreateNew rather than Create: the destination was checked above, and this
-                    // closes the race so a concurrent writer's file is never truncated. With
-                    // --overwrite the user has explicitly accepted replacing whatever is there.
-                    await using var destinationStream = new FileStream(
-                        destinationPath,
-                        options.Overwrite ? FileMode.Create : FileMode.CreateNew,
+                    await using (var destinationStream = new FileStream(
+                        tempPath,
+                        FileMode.CreateNew,
                         FileAccess.Write,
                         FileShare.None,
                         bufferSize: 65536,
-                        useAsync: true);
-                    createdDestination = true;
+                        useAsync: true))
+                    {
+                        result = await streamingDevice.DownloadSdCardFileAsync(
+                            options.SdDownloadFileName, destinationStream, progress);
+                    }
 
-                    result = await streamingDevice.DownloadSdCardFileAsync(
-                        options.SdDownloadFileName, destinationStream, progress);
+                    // A single rename on both POSIX and Windows, so the destination is never
+                    // observed missing or half-written. The two-argument overload throws if the
+                    // destination appeared while the transfer was running, which is the race guard
+                    // that opening with CreateNew used to provide.
+                    if (options.Overwrite)
+                    {
+                        File.Move(tempPath, destinationPath, overwrite: true);
+                    }
+                    else
+                    {
+                        File.Move(tempPath, destinationPath);
+                    }
                 }
                 catch
                 {
-                    // A failed transfer leaves a partial (often empty) file behind, which is easy
-                    // to mistake for a good download. Remove it and let the error propagate.
-                    if (createdDestination)
-                    {
-                        try { File.Delete(destinationPath); } catch { /* best effort */ }
-                    }
-
+                    // Only ever removes our own temp file; the destination is untouched unless the
+                    // rename above already succeeded.
+                    try { File.Delete(tempPath); } catch { /* best effort */ }
                     throw;
                 }
 
