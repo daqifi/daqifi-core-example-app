@@ -44,13 +44,15 @@ dotnet run -- \
 - `--connect-timeout <seconds>` TCP connect timeout (default 5)
 - `--connect-attempts <n>` total connect attempts (default 1)
 - `--keep-connected` keep connection open after streaming stops
-- `--show-status` print protobuf status messages
+- `--show-status` print the device status summary (channel counts, firmware, serial) after connecting
 - `--discover-timeout <seconds>` discovery timeout (default 5)
 - `--sd-list` list files on the SD card (USB/Serial only)
 - `--sd-storage` show SD card free/used/total space (USB/Serial only)
 - `--sd-log-start` start SD card logging (USB/Serial only)
 - `--sd-log-stop` stop SD card logging (USB/Serial only)
-- `--sd-download <filename>` download a file from the SD card and parse it (USB/Serial only)
+- `--sd-download <filename>` download a file from the SD card and parse it, saved as `./<filename>`
+- `--sd-download-to <path>` destination for `--sd-download`: a file path, or a directory to save under the source file name
+- `--overwrite` allow `--sd-download` to replace an existing destination file (refused by default)
 - `--sd-delete <filename>` delete a file from the SD card (USB/Serial only)
 - `--sd-format` format the SD card (USB/Serial only)
 - `--fw-download-latest <dir>` download latest PIC32 firmware HEX into `<dir>`
@@ -100,10 +102,17 @@ Stop logging:
 dotnet run -- --serial /dev/cu.usbmodem2101 --sd-log-stop
 ```
 
-Download and parse a file:
+Download and parse a file (saved as `./log_20260206_101851.bin`):
 
 ```bash
 dotnet run -- --serial /dev/cu.usbmodem2101 --sd-download log_20260206_101851.bin
+```
+
+Download to a specific destination:
+
+```bash
+dotnet run -- --serial /dev/cu.usbmodem2101 --sd-download log_20260206_101851.bin \
+  --sd-download-to ~/captures/
 ```
 
 Delete a file:

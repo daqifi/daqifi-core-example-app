@@ -25,6 +25,22 @@ internal class Program
 
     private static async Task<int> Main(string[] args)
     {
+        try
+        {
+            return await RunAsync(args);
+        }
+        catch (Exception ex)
+        {
+            // Last-resort guard. An exception that escapes Main aborts the process with SIGABRT
+            // (exit code 134) and dumps a stack trace, which reads as a tool defect rather than an
+            // expected operational failure. Report it the way every other failure path does.
+            Console.Error.WriteLine($"Error: {FormatException(ex)}");
+            return 1;
+        }
+    }
+
+    private static async Task<int> RunAsync(string[] args)
+    {
         var options = CliOptions.Parse(args);
         if (options.ShowHelp)
         {
@@ -151,9 +167,20 @@ internal class Program
         return await RunStreamingSessionAsync(options);
     }
 
-    private static async Task<int> RunStreamingSessionAsync(CliOptions options)
+    /// <summary>
+    /// A connected device together with the human-readable description of how it was reached.
+    /// </summary>
+    private sealed record Connection(DaqifiDevice Device, string Description);
+
+    /// <summary>
+    /// Connects to the device described by <paramref name="options"/> over serial or TCP.
+    /// </summary>
+    /// <returns>
+    /// The connection, or <c>null</c> when connecting failed — in which case a single-line error has
+    /// already been written to stderr and the caller should return exit code 1.
+    /// </returns>
+    private static async Task<Connection?> ConnectAsync(CliOptions options)
     {
-        // Build connection options from CLI parameters
         var connectionOptions = new DeviceConnectionOptions
         {
             ConnectionRetry = new ConnectionRetryOptions
@@ -164,26 +191,47 @@ internal class Program
             }
         };
 
-        // Connect via TCP or Serial based on provided options
-        DaqifiDevice device;
-        string connectionDescription;
+        var useSerial = !string.IsNullOrWhiteSpace(options.SerialPort);
+        var description = useSerial
+            ? $"{options.SerialPort} @ {options.BaudRate} baud"
+            : $"{options.IpAddress}:{options.Port}";
 
-        if (!string.IsNullOrWhiteSpace(options.SerialPort))
+        try
         {
-            device = await DaqifiDeviceFactory.ConnectSerialAsync(
-                options.SerialPort,
-                options.BaudRate,
-                connectionOptions);
-            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+            var device = useSerial
+                ? await DaqifiDeviceFactory.ConnectSerialAsync(
+                    options.SerialPort!,
+                    options.BaudRate,
+                    connectionOptions)
+                : await DaqifiDeviceFactory.ConnectTcpAsync(
+                    options.IpAddress!,
+                    options.Port,
+                    connectionOptions);
+
+            return new Connection(device, description);
         }
-        else
+        catch (Exception ex)
         {
-            device = await DaqifiDeviceFactory.ConnectTcpAsync(
-                options.IpAddress!,
-                options.Port,
-                connectionOptions);
-            connectionDescription = $"{options.IpAddress}:{options.Port}";
+            // Caught broadly on purpose. A failed connect is an ordinary outcome for a CLI (device
+            // unplugged, wrong port, wrong IP), and the transport layer surfaces it as any of a
+            // long and evolving list of exception types — IO, UnauthorizedAccess, Timeout, socket
+            // and argument errors among them. Catching the specific types would leave the crash in
+            // place for whichever one we did not list.
+            Console.Error.WriteLine($"Error: Could not connect to {description}: {FormatException(ex)}");
+            return null;
         }
+    }
+
+    private static async Task<int> RunStreamingSessionAsync(CliOptions options)
+    {
+        var connection = await ConnectAsync(options);
+        if (connection is null)
+        {
+            return 1;
+        }
+
+        var device = connection.Device;
+        var connectionDescription = connection.Description;
 
         using var _ = device;
         using var outputWriter = CreateOutputWriter(options);
@@ -222,7 +270,7 @@ internal class Program
 
             if (options.ShowStatusMessages && ProtobufProtocolHandler.DetectMessageType(message) == ProtobufMessageType.Status)
             {
-                WriteStatusSummary(outputWriter, message);
+                WriteStatusSummary(message);
                 return;
             }
 
@@ -276,6 +324,15 @@ internal class Program
         try
         {
             Console.WriteLine($"Connected to {connectionDescription}");
+
+            if (options.ShowStatusMessages)
+            {
+                // The device's status message is requested and consumed during connect, before this
+                // method gets a chance to subscribe, and the device does not re-send one while
+                // streaming. Print the summary from the metadata that connect already parsed
+                // instead of waiting for a message that will never arrive.
+                WriteStatusSummary(device.Metadata);
+            }
 
             if (!string.IsNullOrWhiteSpace(options.ChannelMask))
             {
@@ -354,35 +411,14 @@ internal class Program
             return 1;
         }
 
-        var connectionOptions = new DeviceConnectionOptions
+        var connection = await ConnectAsync(options);
+        if (connection is null)
         {
-            ConnectionRetry = new ConnectionRetryOptions
-            {
-                Enabled = options.ConnectAttempts > 1,
-                MaxAttempts = Math.Max(1, options.ConnectAttempts),
-                ConnectionTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds)
-            }
-        };
-
-        DaqifiDevice device;
-        string connectionDescription;
-
-        if (!string.IsNullOrWhiteSpace(options.SerialPort))
-        {
-            device = await DaqifiDeviceFactory.ConnectSerialAsync(
-                options.SerialPort,
-                options.BaudRate,
-                connectionOptions);
-            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+            return 1;
         }
-        else
-        {
-            device = await DaqifiDeviceFactory.ConnectTcpAsync(
-                options.IpAddress!,
-                options.Port,
-                connectionOptions);
-            connectionDescription = $"{options.IpAddress}:{options.Port}";
-        }
+
+        var device = connection.Device;
+        var connectionDescription = connection.Description;
 
         using var _ = device;
         using var hidTransport = new HidLibraryTransport();
@@ -793,35 +829,32 @@ internal class Program
 
     private static async Task<int> RunSdCardOperationAsync(CliOptions options)
     {
-        var connectionOptions = new DeviceConnectionOptions
+        // Resolve (and reject) the download destination before connecting, so a bad path costs
+        // nothing and can never be discovered after a long transfer.
+        string? sdDownloadDestination = null;
+        if (!string.IsNullOrWhiteSpace(options.SdDownloadFileName))
         {
-            ConnectionRetry = new ConnectionRetryOptions
+            sdDownloadDestination = ResolveSdDownloadDestination(
+                options.SdDownloadFileName,
+                options.SdDownloadDestination,
+                options.Overwrite,
+                out var destinationError);
+
+            if (sdDownloadDestination is null)
             {
-                Enabled = options.ConnectAttempts > 1,
-                MaxAttempts = Math.Max(1, options.ConnectAttempts),
-                ConnectionTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds)
+                Console.Error.WriteLine(destinationError);
+                return 1;
             }
-        };
-
-        DaqifiDevice device;
-        string connectionDescription;
-
-        if (!string.IsNullOrWhiteSpace(options.SerialPort))
-        {
-            device = await DaqifiDeviceFactory.ConnectSerialAsync(
-                options.SerialPort,
-                options.BaudRate,
-                connectionOptions);
-            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
         }
-        else
+
+        var connection = await ConnectAsync(options);
+        if (connection is null)
         {
-            device = await DaqifiDeviceFactory.ConnectTcpAsync(
-                options.IpAddress!,
-                options.Port,
-                connectionOptions);
-            connectionDescription = $"{options.IpAddress}:{options.Port}";
+            return 1;
         }
+
+        var device = connection.Device;
+        var connectionDescription = connection.Description;
 
         using var _ = device;
 
@@ -969,29 +1002,73 @@ internal class Program
                     Console.Write($"\r  Received {p.BytesReceived:N0} bytes...");
                 });
 
-                var result = await streamingDevice.DownloadSdCardFileAsync(
-                    options.SdDownloadFileName, progress);
+                // The destination-stream overload is used instead of the convenience overload so
+                // the file lands where the user can find it. The convenience overload writes to
+                // Path.GetTempPath()/daqifi_<guid>.bin, which is subject to OS temp cleanup and
+                // bears no relation to the source name.
+                var destinationPath = sdDownloadDestination!;
+                SdCardDownloadResult result;
+
+                // Download into a sibling temporary file and publish it only once the transfer has
+                // completed. Writing straight to the destination would mean a stalled or failed
+                // download destroys whatever was already there (with --overwrite, the moment the
+                // file is opened) or leaves a partial one that looks like a good download. A
+                // sibling rather than the system temp directory keeps the publish step a
+                // same-volume rename instead of a cross-device copy.
+                var tempPath = $"{destinationPath}.part-{Guid.NewGuid():N}";
+                try
+                {
+                    await using (var destinationStream = new FileStream(
+                        tempPath,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None,
+                        bufferSize: 65536,
+                        useAsync: true))
+                    {
+                        result = await streamingDevice.DownloadSdCardFileAsync(
+                            options.SdDownloadFileName, destinationStream, progress);
+                    }
+
+                    // A single rename on both POSIX and Windows, so the destination is never
+                    // observed missing or half-written. The two-argument overload throws if the
+                    // destination appeared while the transfer was running, which is the race guard
+                    // that opening with CreateNew used to provide.
+                    if (options.Overwrite)
+                    {
+                        File.Move(tempPath, destinationPath, overwrite: true);
+                    }
+                    else
+                    {
+                        File.Move(tempPath, destinationPath);
+                    }
+                }
+                catch
+                {
+                    // Only ever removes our own temp file; the destination is untouched unless the
+                    // rename above already succeeded.
+                    try { File.Delete(tempPath); } catch { /* best effort */ }
+                    throw;
+                }
 
                 Console.WriteLine();
                 Console.WriteLine($"Download complete: {result.FileSize:N0} bytes in {result.Duration.TotalSeconds:F1}s");
+                Console.WriteLine($"Saved to: {destinationPath}");
 
-                if (result.FilePath != null)
+                // Parse the downloaded file (any supported format). The format is a property of the
+                // file's name on the device, not of wherever the user chose to save it — otherwise
+                // a --sd-download-to path with no extension (or a different one) would silently
+                // skip the parse that --sd-download documents.
+                if (IsParseableLogFile(options.SdDownloadFileName))
                 {
-                    Console.WriteLine($"Saved to: {result.FilePath}");
+                    Console.WriteLine();
+                    Console.WriteLine("--- Parsing downloaded file ---");
+                    options.SdParsePath = destinationPath;
 
-                    // Parse the downloaded file (any supported format)
-                    var downloadExt = Path.GetExtension(result.FilePath).ToLowerInvariant();
-                    if (downloadExt is ".bin" or ".csv" or ".json")
-                    {
-                        Console.WriteLine();
-                        Console.WriteLine("--- Parsing downloaded file ---");
-                        options.SdParsePath = result.FilePath;
-
-                        // Pass the connected device's config so the parser can
-                        // scale raw ADC values using the device's calibration.
-                        var deviceConfig = SdCardDeviceConfiguration.FromDevice((DaqifiDevice)device);
-                        return await RunSdCardParseAsync(options, deviceConfig);
-                    }
+                    // Pass the connected device's config so the parser can
+                    // scale raw ADC values using the device's calibration.
+                    var deviceConfig = SdCardDeviceConfiguration.FromDevice((DaqifiDevice)device);
+                    return await RunSdCardParseAsync(options, deviceConfig, options.SdDownloadFileName);
                 }
             }
             else if (options.SdFormat)
@@ -1029,9 +1106,109 @@ internal class Program
         }
     }
 
+    /// <summary>
+    /// Works out where <c>--sd-download</c> should write, defaulting to the source file name in the
+    /// current directory and honouring <c>--sd-download-to</c> when given.
+    /// </summary>
+    /// <param name="sourceFileName">The file name on the device's SD card.</param>
+    /// <param name="requestedDestination">The <c>--sd-download-to</c> value, if any.</param>
+    /// <param name="allowOverwrite">Whether <c>--overwrite</c> was given.</param>
+    /// <param name="error">Set to the message to print when the destination is unusable.</param>
+    /// <returns>The absolute destination path, or <c>null</c> when it is unusable.</returns>
+    private static string? ResolveSdDownloadDestination(
+        string sourceFileName,
+        string? requestedDestination,
+        bool allowOverwrite,
+        out string? error)
+    {
+        error = null;
+
+        // The file name is echoed back from the device's own listing, so treat it as untrusted:
+        // strip any directory component before using it, or a name like "../../evil.bin" would
+        // write outside the directory the user chose.
+        var safeName = Path.GetFileName(sourceFileName.Trim());
+        if (string.IsNullOrWhiteSpace(safeName) || safeName is "." or "..")
+        {
+            error = $"Cannot derive a destination file name from '{sourceFileName}'. Use --sd-download-to <path>.";
+            return null;
+        }
+
+        string candidate;
+        if (string.IsNullOrWhiteSpace(requestedDestination))
+        {
+            candidate = safeName;
+        }
+        else if (Directory.Exists(requestedDestination) || EndsWithDirectorySeparator(requestedDestination))
+        {
+            candidate = Path.Combine(requestedDestination, safeName);
+        }
+        else
+        {
+            candidate = requestedDestination;
+        }
+
+        string destinationPath;
+        try
+        {
+            destinationPath = Path.GetFullPath(candidate);
+        }
+        catch (Exception ex)
+        {
+            error = $"Invalid destination path '{candidate}': {FormatException(ex)}";
+            return null;
+        }
+
+        if (Directory.Exists(destinationPath))
+        {
+            error = $"Destination is a directory: {destinationPath}";
+            return null;
+        }
+
+        if (!allowOverwrite && File.Exists(destinationPath))
+        {
+            error = $"Destination already exists: {destinationPath}. " +
+                    "Pass --overwrite to replace it, or use --sd-download-to <path> to write somewhere else.";
+            return null;
+        }
+
+        var directory = Path.GetDirectoryName(destinationPath);
+        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+        {
+            error = $"Destination directory does not exist: {directory}";
+            return null;
+        }
+
+        return destinationPath;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="fileName"/> names a log format the parser understands.
+    /// </summary>
+    /// <remarks>
+    /// The extensions are listed here rather than read from Core (<c>TryDetectFormat</c> /
+    /// <c>SupportedExtensions</c>) because this project also builds against the pinned
+    /// <c>Daqifi.Core</c> package release, which predates both — the same reason
+    /// <see cref="GetLogFormatLabel(string)"/> lists them too.
+    /// </remarks>
+    private static bool IsParseableLogFile(string fileName)
+        => Path.GetExtension(fileName).ToLowerInvariant() is ".bin" or ".csv" or ".json";
+
+    private static bool EndsWithDirectorySeparator(string path)
+    {
+        return path.EndsWith(Path.DirectorySeparatorChar) || path.EndsWith(Path.AltDirectorySeparatorChar);
+    }
+
+    /// <param name="options">Parsed CLI options; <c>SdParsePath</c> selects the file to read.</param>
+    /// <param name="deviceConfig">Optional live device configuration used to scale raw ADC values.</param>
+    /// <param name="sourceFileName">
+    /// The name the file had on the device, when it was just downloaded. The format and the logging
+    /// date are read from this name rather than from the local path, so saving under a different
+    /// name (or none) via <c>--sd-download-to</c> does not change how the file is parsed.
+    /// </param>
     private static async Task<int> RunSdCardParseAsync(
         CliOptions options,
-        SdCardDeviceConfiguration? deviceConfig = null)
+        SdCardDeviceConfiguration? deviceConfig = null,
+        string? sourceFileName = null)
     {
         var filePath = options.SdParsePath!;
         if (!File.Exists(filePath))
@@ -1040,10 +1217,13 @@ internal class Program
             return 1;
         }
 
+        // When the file was downloaded, its identity for parsing purposes is the device-side name.
+        var formatSourceName = sourceFileName ?? filePath;
+
         SdCardLogFormat format;
         try
         {
-            format = SdCardFileParserFactory.DetectFormat(filePath);
+            format = SdCardFileParserFactory.DetectFormat(formatSourceName);
         }
         catch (ArgumentException ex)
         {
@@ -1051,7 +1231,7 @@ internal class Program
             return 1;
         }
 
-        var formatLabel = GetLogFormatLabel(filePath);
+        var formatLabel = GetLogFormatLabel(format);
         Console.WriteLine($"Parsing {formatLabel} SD card log file: {filePath}");
 
         var parseOptions = new SdCardParseOptions
@@ -1069,7 +1249,23 @@ internal class Program
 
         try
         {
-            var session = await SdCardFileParserFactory.ParseFileAsync(filePath, parseOptions);
+            // Parsed with an explicit format rather than via ParseFileAsync, which would re-derive
+            // the format from the local path. Identical for a plain --sd-parse (the name passed for
+            // metadata is the same one ParseFileAsync would use); for a download it keeps the
+            // device-side name, so the format and the logging date survive --sd-download-to.
+            await using var parseStream = new FileStream(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: parseOptions.BufferSize,
+                useAsync: true);
+
+            var session = await SdCardFileParserFactory.ParseWithFormatAsync(
+                parseStream,
+                Path.GetFileName(formatSourceName),
+                format,
+                parseOptions);
             Console.WriteLine();
 
             Console.WriteLine($"File: {session.FileName}");
@@ -1164,12 +1360,12 @@ internal class Program
         await using (var fileStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.Read))
         await using (var writer = new StreamWriter(fileStream))
         {
-            var countingSource = new CountingSampleSource(sampleSource, count =>
+            var countingSource = new RowCountingSampleSource(sampleSource, rows =>
             {
-                rowsWritten = count;
+                rowsWritten = rows;
                 if (stopwatch.Elapsed - lastReport > TimeSpan.FromMilliseconds(250))
                 {
-                    Console.Write($"\r  {count} rows written ({count / Math.Max(1, stopwatch.Elapsed.TotalSeconds):N0} rows/s)");
+                    Console.Write($"\r  {rows} rows written ({rows / Math.Max(1, stopwatch.Elapsed.TotalSeconds):N0} rows/s)");
                     lastReport = stopwatch.Elapsed;
                 }
             });
@@ -1214,35 +1410,14 @@ internal class Program
     /// </summary>
     private static async Task<int> RunCaptureAndParseAsync(CliOptions options)
     {
-        var connectionOptions = new DeviceConnectionOptions
+        var connection = await ConnectAsync(options);
+        if (connection is null)
         {
-            ConnectionRetry = new ConnectionRetryOptions
-            {
-                Enabled = options.ConnectAttempts > 1,
-                MaxAttempts = Math.Max(1, options.ConnectAttempts),
-                ConnectionTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds)
-            }
-        };
-
-        DaqifiDevice device;
-        string connectionDescription;
-
-        if (!string.IsNullOrWhiteSpace(options.SerialPort))
-        {
-            device = await DaqifiDeviceFactory.ConnectSerialAsync(
-                options.SerialPort,
-                options.BaudRate,
-                connectionOptions);
-            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+            return 1;
         }
-        else
-        {
-            device = await DaqifiDeviceFactory.ConnectTcpAsync(
-                options.IpAddress!,
-                options.Port,
-                connectionOptions);
-            connectionDescription = $"{options.IpAddress}:{options.Port}";
-        }
+
+        var device = connection.Device;
+        var connectionDescription = connection.Description;
 
         using var _ = device;
         var capturePath = options.CaptureAndParsePath!;
@@ -1326,35 +1501,14 @@ internal class Program
 
     private static async Task<int> RunLanChipInfoAsync(CliOptions options)
     {
-        var connectionOptions = new DeviceConnectionOptions
+        var connection = await ConnectAsync(options);
+        if (connection is null)
         {
-            ConnectionRetry = new ConnectionRetryOptions
-            {
-                Enabled = options.ConnectAttempts > 1,
-                MaxAttempts = Math.Max(1, options.ConnectAttempts),
-                ConnectionTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds)
-            }
-        };
-
-        DaqifiDevice device;
-        string connectionDescription;
-
-        if (!string.IsNullOrWhiteSpace(options.SerialPort))
-        {
-            device = await DaqifiDeviceFactory.ConnectSerialAsync(
-                options.SerialPort,
-                options.BaudRate,
-                connectionOptions);
-            connectionDescription = $"{options.SerialPort} @ {options.BaudRate} baud";
+            return 1;
         }
-        else
-        {
-            device = await DaqifiDeviceFactory.ConnectTcpAsync(
-                options.IpAddress!,
-                options.Port,
-                connectionOptions);
-            connectionDescription = $"{options.IpAddress}:{options.Port}";
-        }
+
+        var device = connection.Device;
+        var connectionDescription = connection.Description;
 
         using var _ = device;
 
@@ -1437,11 +1591,39 @@ internal class Program
         }
     }
 
-    private static void WriteStatusSummary(TextWriter writer, DaqifiOutMessage message)
+    /// <summary>
+    /// Prints the device's reported channel counts, firmware revision and serial number from the
+    /// metadata that connect/initialization already parsed.
+    /// </summary>
+    private static void WriteStatusSummary(DeviceMetadata metadata)
     {
-        writer.WriteLine(
-            $"Status: analogIn={message.AnalogInPortNum} digital={message.DigitalPortNum} " +
-            $"fw={message.DeviceFwRev ?? "unknown"} sn={message.DeviceSn}");
+        WriteStatusSummary(
+            metadata.Capabilities.AnalogInputChannels,
+            metadata.Capabilities.DigitalChannels,
+            metadata.FirmwareVersion,
+            metadata.SerialNumber);
+    }
+
+    /// <summary>
+    /// Prints the same summary for a status message that arrives while a handler is subscribed.
+    /// </summary>
+    private static void WriteStatusSummary(DaqifiOutMessage message)
+    {
+        WriteStatusSummary(
+            (int)message.AnalogInPortNum,
+            (int)message.DigitalPortNum,
+            message.DeviceFwRev,
+            message.DeviceSn == 0 ? null : message.DeviceSn.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static void WriteStatusSummary(int analogInPorts, int digitalPorts, string? firmware, string? serialNumber)
+    {
+        // Written to the console rather than the sample output writer: this is diagnostic output,
+        // and mixing it into a --output CSV/JSONL file would corrupt the data.
+        Console.WriteLine(
+            $"Status: analogIn={analogInPorts} digital={digitalPorts} " +
+            $"fw={(string.IsNullOrWhiteSpace(firmware) ? "unknown" : firmware)} " +
+            $"sn={(string.IsNullOrWhiteSpace(serialNumber) ? "unknown" : serialNumber)}");
     }
 
     private static string ToTextLine(DaqifiOutMessage analogMsg, DaqifiOutMessage? digitalMsg)
@@ -1544,6 +1726,17 @@ internal class Program
         };
     }
 
+    private static string GetLogFormatLabel(SdCardLogFormat format)
+    {
+        return format switch
+        {
+            SdCardLogFormat.Protobuf => "Protobuf",
+            SdCardLogFormat.Json => "JSON",
+            SdCardLogFormat.Csv => "CSV",
+            _ => "Unknown"
+        };
+    }
+
     private static bool IsValidChannelMask(string channelMask)
     {
         return uint.TryParse(channelMask, out _);
@@ -1580,7 +1773,7 @@ internal class Program
         Console.WriteLine("Output Options:");
         Console.WriteLine("  --format <text|csv|jsonl> Output format for stream samples (default: text).");
         Console.WriteLine("  --output <path>          Write samples to file instead of stdout.");
-        Console.WriteLine("  --show-status            Print protobuf status messages when received.");
+        Console.WriteLine("  --show-status            Print the device status summary after connecting.");
         Console.WriteLine();
         Console.WriteLine("SD Card Options:");
         Console.WriteLine("  --sd-list                List files on the SD card (USB/serial only).");
@@ -1589,7 +1782,10 @@ internal class Program
         Console.WriteLine("  --sd-log-format <fmt>    Log format: protobuf (default), json, csv.");
         Console.WriteLine("  --sd-log-stop            Stop SD card logging.");
         Console.WriteLine("  --sd-delete <filename>   Delete a file from the SD card.");
-        Console.WriteLine("  --sd-download <filename> Download a file from the SD card (USB/serial only).");
+        Console.WriteLine("  --sd-download <filename> Download a file from the SD card, saved as ./<filename>.");
+        Console.WriteLine("  --sd-download-to <path>  Destination for --sd-download: a file path, or a directory to");
+        Console.WriteLine("                           save under the source file name.");
+        Console.WriteLine("  --overwrite              Allow --sd-download to replace an existing destination file.");
         Console.WriteLine("  --sd-format              Format the SD card (erases all data).");
         Console.WriteLine("  --sd-parse <path>        Parse a .bin log file from the SD card.");
         Console.WriteLine("  --sd-export-csv <path>   With --sd-parse, write samples as CSV to <path> using Daqifi.Core's CsvExporter.");
@@ -1663,6 +1859,8 @@ internal class Program
         public SdCardLogFormat SdLogFormat { get; private set; } = SdCardLogFormat.Protobuf;
         public string? SdDeleteFileName { get; private set; }
         public string? SdDownloadFileName { get; private set; }
+        public string? SdDownloadDestination { get; private set; }
+        public bool Overwrite { get; private set; }
         public bool SdFormat { get; private set; }
         public bool SdStorage { get; private set; }
         public string? SdParsePath { get; set; }
@@ -1763,6 +1961,12 @@ internal class Program
                         break;
                     case "--sd-download":
                         options.SdDownloadFileName = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--sd-download-to":
+                        options.SdDownloadDestination = GetValue(args, ref i, arg, options.Errors);
+                        break;
+                    case "--overwrite":
+                        options.Overwrite = true;
                         break;
                     case "--sd-format":
                         options.SdFormat = true;
@@ -1891,6 +2095,17 @@ internal class Program
                 string.IsNullOrWhiteSpace(options.SdParsePath))
             {
                 options.Errors.Add("--sd-export-csv requires --sd-parse <path>.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.SdDownloadDestination) &&
+                string.IsNullOrWhiteSpace(options.SdDownloadFileName))
+            {
+                options.Errors.Add("--sd-download-to requires --sd-download <filename>.");
+            }
+
+            if (options.Overwrite && string.IsNullOrWhiteSpace(options.SdDownloadFileName))
+            {
+                options.Errors.Add("--overwrite requires --sd-download <filename>.");
             }
 
             return options;
