@@ -19,3 +19,6 @@ jobs:
 
       - name: Build
         run: dotnet build -c Release --no-restore
+
+      - name: Check SD parse limits
+        run: python3 tests/sd_parse_limit.py bin/Release/net9.0/Daqifi.Core.Cli.dll
