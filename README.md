@@ -6,7 +6,8 @@ This is a lightweight CLI that demonstrates how to use `Daqifi.Core` to discover
 
 - .NET 9 SDK
 - A DAQiFi device reachable via WiFi or USB/Serial
-- SD card operations require a USB/Serial connection (not available over WiFi)
+- SD card file listing, storage queries, downloads, and deletion work over USB/Serial or WiFi/TCP. WiFi/TCP requires device firmware v3.7.0 or later.
+- Starting SD card logging requires USB/Serial because it disables the LAN interface.
 
 ## Quick Start
 
@@ -46,14 +47,14 @@ dotnet run -- \
 - `--keep-connected` keep connection open after streaming stops
 - `--show-status` print the device status summary (channel counts, firmware, serial) after connecting
 - `--discover-timeout <seconds>` discovery timeout (default 5)
-- `--sd-list` list files on the SD card (USB/Serial only)
-- `--sd-storage` show SD card free/used/total space (USB/Serial only)
+- `--sd-list` list files on the SD card (USB/Serial or WiFi/TCP with firmware v3.7.0 or later)
+- `--sd-storage` show SD card free/used/total space (USB/Serial or WiFi/TCP with firmware v3.7.0 or later)
 - `--sd-log-start` start SD card logging (USB/Serial only)
-- `--sd-log-stop` stop SD card logging (USB/Serial only)
-- `--sd-download <filename>` download a file from the SD card and parse it, saved as `./<filename>`
+- `--sd-log-stop` stop SD card logging
+- `--sd-download <filename>` download a file from the SD card and parse it, saved as `./<filename>` (USB/Serial or WiFi/TCP with firmware v3.7.0 or later)
 - `--sd-download-to <path>` destination for `--sd-download`: a file path, or a directory to save under the source file name
 - `--overwrite` allow `--sd-download` to replace an existing destination file (refused by default)
-- `--sd-delete <filename>` delete a file from the SD card (USB/Serial only)
+- `--sd-delete <filename>` delete a file from the SD card (USB/Serial or WiFi/TCP with firmware v3.7.0 or later)
 - `--sd-format` format the SD card (USB/Serial only)
 - `--fw-download-latest <dir>` download latest PIC32 firmware HEX into `<dir>`
 - `--fw-download-tag <tag> <dir>` download PIC32 firmware HEX for `<tag>` into `<dir>`
@@ -84,7 +85,17 @@ miss threshold of consecutive missed passes). On exit, the final live set is pri
 
 ## SD Card
 
-List files:
+File listing, storage queries, downloads, and deletion work over USB/Serial. They also work over WiFi/TCP when the device has firmware v3.7.0 or later. Core rejects these WiFi/TCP operations on older firmware with `FeatureNotSupportedException`.
+
+For example, list files over WiFi:
+
+```bash
+dotnet run -- --ip 192.168.1.44 --sd-list
+```
+
+Starting a logging session requires USB/Serial because it disables LAN to give the SD card access to the shared SPI bus. Use USB/Serial for the logging commands below.
+
+List files over USB/Serial:
 
 ```bash
 dotnet run -- --serial /dev/cu.usbmodem2101 --sd-list
