@@ -1296,17 +1296,16 @@ internal class Program
 
             await foreach (var sample in session.Samples)
             {
-                sampleCount++;
-
-                if (options.MessageLimit > 0 && sampleCount > options.MessageLimit)
-                {
-                    break;
-                }
-
                 var analogStr = string.Join(", ",
                     sample.AnalogValues.Select(v => v.ToString("F3", CultureInfo.InvariantCulture)));
                 outputWriter.WriteLine(
                     $"[{sample.Timestamp:HH:mm:ss.fff}] analog=[{analogStr}] digital=0x{sample.DigitalData:X}");
+
+                sampleCount++;
+                if (options.MessageLimit > 0 && sampleCount >= options.MessageLimit)
+                {
+                    break;
+                }
             }
 
             Console.WriteLine($"Total samples: {sampleCount}");
