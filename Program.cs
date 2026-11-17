@@ -1043,6 +1043,47 @@ internal class Program
                         File.Move(tempPath, destinationPath);
                     }
                 }
+                catch (SdCardTransferErrorException ex)
+                {
+                    // The one failure whose bytes are worth keeping. Firmware v3.7.3+ ends a
+                    // failed read with __TRANSFER_ERROR__, and Core leaves everything received
+                    // before that marker in the destination stream because it is genuine file
+                    // content — unlike SdCardTruncatedTransferException, whose bytes are a short
+                    // reply standing in for the file and must be discarded. Publish it under a
+                    // name that cannot be mistaken for a finished download rather than deleting a
+                    // log the user may still be able to read.
+
+                    // Closes off the carriage-returned progress line before anything else prints.
+                    Console.WriteLine();
+
+                    var partialPath = $"{destinationPath}.partial";
+                    string? recoveredPath;
+                    try
+                    {
+                        // Overwritten unconditionally: a .partial is this tool's own record of a
+                        // failed attempt, and on a retry the newest one is the one that matters.
+                        File.Move(tempPath, partialPath, overwrite: true);
+                        recoveredPath = partialPath;
+                    }
+                    catch (Exception moveEx)
+                    {
+                        // Keeping the bytes matters more than the name they are under, so leave
+                        // the temp file where it is instead of losing a partial log to a rename.
+                        recoveredPath = File.Exists(tempPath) ? tempPath : null;
+                        Console.Error.WriteLine(
+                            $"Could not rename partial download to {partialPath}: {FormatException(moveEx)}");
+                    }
+
+                    if (recoveredPath != null)
+                    {
+                        Console.WriteLine(
+                            $"Recovered {ex.BytesReceived:N0} bytes received before the device reported the error.");
+                        Console.WriteLine("The file is incomplete, so it was not parsed.");
+                        Console.WriteLine($"Partial file: {recoveredPath}");
+                    }
+
+                    throw;
+                }
                 catch
                 {
                     // Only ever removes our own temp file; the destination is untouched unless the

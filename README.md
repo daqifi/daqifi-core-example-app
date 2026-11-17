@@ -115,6 +115,11 @@ dotnet run -- --serial /dev/cu.usbmodem2101 --sd-download log_20260206_101851.bi
   --sd-download-to ~/captures/
 ```
 
+If the device hits a read error part-way through serving the file (firmware v3.7.3+ reports
+this explicitly), the download fails, but the bytes that arrived first are genuine file content
+and are kept as `<destination>.partial` instead of being discarded. That file is incomplete, so
+it is not parsed; retry the download to get the whole log.
+
 Delete a file:
 
 ```bash
