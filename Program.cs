@@ -1776,9 +1776,10 @@ internal class Program
         Console.WriteLine("  --show-status            Print the device status summary after connecting.");
         Console.WriteLine();
         Console.WriteLine("SD Card Options:");
-        Console.WriteLine("  --sd-list                List files on the SD card (USB/serial only).");
-        Console.WriteLine("  --sd-storage             Show SD card free/used/total space (USB/serial only).");
-        Console.WriteLine("  --sd-log-start           Start SD card logging (use --duration to auto-stop).");
+        Console.WriteLine("  File list, storage, download and delete also support WiFi/TCP with firmware >= 3.7.0.");
+        Console.WriteLine("  --sd-list                List files on the SD card (USB/serial or WiFi with firmware >= 3.7.0).");
+        Console.WriteLine("  --sd-storage             Show SD card space (USB/serial or WiFi with firmware >= 3.7.0).");
+        Console.WriteLine("  --sd-log-start           Start SD card logging over USB/serial (use --duration to auto-stop).");
         Console.WriteLine("  --sd-log-format <fmt>    Log format: protobuf (default), json, csv.");
         Console.WriteLine("  --sd-log-stop            Stop SD card logging.");
         Console.WriteLine("  --sd-delete <filename>   Delete a file from the SD card.");
